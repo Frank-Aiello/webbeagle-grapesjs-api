@@ -120,14 +120,19 @@ def _download_asset(url: str, filename: str) -> str:
     return f"/assets/{filename}"
 
 def _generate_image(prompt: str, aspect_ratio: str = "16:9", model: str = "grok-imagine/text-to-image") -> str:
-    """Generate image via KIE, download to assets, return public URL path."""
-    taskId = _kie_submit(model, {"prompt": prompt, "aspect_ratio": aspect_ratio})
-    info = _kie_poll(taskId, model)
-    img_url = info.get("resultImageUrl")
-    if not img_url:
-        raise Exception(f"No resultImageUrl in KIE response: {info}")
-    filename = f"kie-img-{taskId[:8]}.png"
-    return _download_asset(img_url, filename)
+    """Generate image via KIE, download to assets, return public URL path.
+    Returns empty string on timeout (graceful degradation)."""
+    try:
+        taskId = _kie_submit(model, {"prompt": prompt, "aspect_ratio": aspect_ratio})
+        info = _kie_poll(taskId, model, timeout=120)  # 2 min timeout
+        img_url = info.get("resultImageUrl")
+        if not img_url:
+            return ""
+        filename = f"kie-img-{taskId[:8]}.png"
+        return _download_asset(img_url, filename)
+    except Exception as e:
+        print(f"[KIE image] {e}")
+        return ""
 
 def _generate_video(prompt: str, aspect_ratio: str = "16:9", duration: str = "5",
                     model: str = "grok-imagine/text-to-video") -> str:
