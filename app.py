@@ -81,21 +81,33 @@ def _kie_submit(model: str, input_params: dict, callBackUrl: str = None) -> str:
         return data["data"]["taskId"]
     raise Exception(f"KIE submit error: {data}")
 
-def _kie_poll(taskId: str, timeout: int = 180) -> dict:
+def _kie_poll(taskId: str, model: str, timeout: int = 300) -> dict:
     """Poll for task completion. Returns {resultImageUrl, resultVideoUrl, ...}."""
+    # Determine query endpoint based on model family
+    if "grok" in model:
+        query_url = f"{KIE_BASE}/grok/record-info?taskId={taskId}"
+    elif "flux" in model:
+        query_url = f"{KIE_BASE}/flux/kontext/record-info?taskId={taskId}"
+    else:
+        query_url = f"{KIE_BASE}/jobs/taskStatus?taskId={taskId}"
+    
     deadline = time.time() + timeout
     while time.time() < deadline:
         r = requests.get(
-            f"{KIE_BASE}/jobs/taskStatus?taskId={taskId}",
+            query_url,
             headers={"Authorization": f"Bearer {KIE_API_KEY}"},
             timeout=10
         )
         data = r.json()
-        if data.get("code") == 200:
-            info = data.get("data", {}).get("info", {})
-            if info.get("resultImageUrl") or info.get("resultVideoUrl"):
-                return info
-        elif data.get("code") in (400, 500, 501):
+        # Check for success
+        success_flag = data.get("data", {}).get("successFlag")
+        if success_flag == 1:
+            response_data = data.get("data", {}).get("response", {})
+            return {
+                "resultImageUrl": response_data.get("resultImageUrl"),
+                "resultVideoUrl": response_data.get("resultVideoUrl"),
+            }
+        elif success_flag in (2, 3):
             raise Exception(f"KIE task failed: {data}")
         time.sleep(3)
     raise Exception(f"KIE task {taskId} timed out after {timeout}s")
@@ -110,7 +122,7 @@ def _download_asset(url: str, filename: str) -> str:
 def _generate_image(prompt: str, aspect_ratio: str = "16:9", model: str = "grok-imagine/text-to-image") -> str:
     """Generate image via KIE, download to assets, return public URL path."""
     taskId = _kie_submit(model, {"prompt": prompt, "aspect_ratio": aspect_ratio})
-    info = _kie_poll(taskId)
+    info = _kie_poll(taskId, model)
     img_url = info.get("resultImageUrl")
     if not img_url:
         raise Exception(f"No resultImageUrl in KIE response: {info}")
@@ -126,7 +138,7 @@ def _generate_video(prompt: str, aspect_ratio: str = "16:9", duration: str = "5"
         "duration": duration,
         "resolution": "720p"
     })
-    info = _kie_poll(taskId, timeout=300)
+    info = _kie_poll(taskId, model, timeout=300)
     vid_url = info.get("resultVideoUrl")
     if not vid_url:
         raise Exception(f"No resultVideoUrl in KIE response: {info}")
@@ -735,7 +747,7 @@ Rebuild the entire site as a single HTML page. Rules:
 Return ONLY the complete HTML (no markdown, no explanations). The output goes directly into GrapesJS and must render perfectly standalone."""
 
     try:
-        full_html = _claude_generate(assembly_prompt, "", max_tokens=8000)
+        full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=8000)
         # Strip markdown wrappers
         if full_html.startswith("```"):
             lines = full_html.split("\n")
