@@ -443,10 +443,20 @@ def preview(project_id, page_id):
 #  AI — Section Generation (Claude Sonnet 4)
 # ══════════════════════════════════════════════════════════════
 
-def _claude_generate(system_msg: str, user_msg: str, max_tokens: int = 4000) -> str:
-    """Generate HTML using Claude Sonnet 4 — best for web design."""
+def _claude_generate(system_msg: str, user_msg, max_tokens: int = 4000) -> str:
+    """Generate HTML using Claude Sonnet 4 — best for web design.
+    user_msg can be a string or a list of content blocks (for images)."""
     if not anthropic_client:
         # Fallback to GPT-5.5 if Anthropic not configured
+        if isinstance(user_msg, list):
+            # Convert image blocks for OpenAI format
+            openai_content = []
+            for block in user_msg:
+                if block.get("type") == "image":
+                    openai_content.append({"type": "image_url", "image_url": block["source"]})
+                else:
+                    openai_content.append(block)
+            user_msg = openai_content
         response = ai_client.chat.completions.create(
             model="gpt-5.5",
             messages=[
@@ -458,12 +468,29 @@ def _claude_generate(system_msg: str, user_msg: str, max_tokens: int = 4000) -> 
         )
         return response.choices[0].message.content.strip()
 
+    # Claude format
+    if isinstance(user_msg, str):
+        user_content = user_msg
+    else:
+        user_content = []
+        for block in user_msg:
+            if block.get("type") == "image":
+                user_content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "url",
+                        "url": block["source"]["url"]
+                    }
+                })
+            else:
+                user_content.append(block)
+
     response = anthropic_client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=max_tokens,
         temperature=0.7,
         system=system_msg,
-        messages=[{"role": "user", "content": user_msg}]
+        messages=[{"role": "user", "content": user_content}]
     )
     return response.content[0].text.strip()
 
@@ -619,7 +646,8 @@ Return a JSON object with these keys:
     steps_log.append("1/5: Analyzing design image...")
     try:
         vision_response = _claude_generate(vision_prompt, 
-            [{"type": "image_url", "image_url": {"url": design_image_url}}])
+            [{"type": "text", "text": "Analyze this design image."},
+             {"type": "image", "source": {"type": "url", "url": design_image_url}}])
         # Try to parse JSON from the response
         json_match = re.search(r'\{.*\}', vision_response, re.DOTALL)
         design_data = json.loads(json_match.group()) if json_match else {}
