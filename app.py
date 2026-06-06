@@ -649,17 +649,70 @@ def ai_redesign():
     steps_log = []
 
     # ── Step 1: Vision Analysis ──
-    vision_prompt = """Analyze this design image exhaustively for building a complete website theme.
+    vision_prompt = """You are a design analyst extracting EXACT visual specifications from this image to generate a pixel-matched website theme.
 
-Return a JSON object with these keys:
-- "mood": 3-5 aesthetic keywords
-- "palette": { "bg": "#hex", "text": "#hex", "accent": "#hex", "secondary": "#hex", "muted": "#hex" }
-- "typography": { "heading_font": "font name", "body_font": "font name", "heading_weight": "bold/normal", "heading_case": "uppercase/lowercase/none", "heading_size": "clamp(...) or px" }
-- "effects": ["list of visual effects: textures, patterns, halftone, gradients"]
-- "button_style": { "bg": "#hex", "text": "#hex", "border_radius": "px", "padding": "px px" }
-- "layout": "description of section structure, columns, alignment"
-- "generated_css": "Complete theme CSS with :root variables, body styles, heading styles, button styles, section wrappers, card styles, and any special effects. Include font imports. Make it production-ready."
-"""
+Return a JSON object with THESE EXACT KEYS. Be specific — every value must match what you SEE in the image:
+
+{
+  "mood": "exact 3-5 word aesthetic description",
+  "palette": {
+    "bg": "#hex — the main background color",
+    "text_primary": "#hex — the dominant text color on dark bg",
+    "accent": "#hex — the highlight/accent color (likely green)",
+    "accent_text": "#hex — color of text ON accent backgrounds",
+    "paper": "#hex — the beige/paper strip color at the top",
+    "muted": "#hex — secondary text, placeholder text"
+  },
+  "typography": {
+    "heading_font": "exact font family for bold headlines",
+    "body_font": "exact font family for body text",
+    "hero_headline": {
+      "size": "clamp or px value",
+      "weight": "bold or number",
+      "case": "uppercase",
+      "letter_spacing": "normal/tight/wide",
+      "style": "bold industrial sans-serif, specific describing words"
+    },
+    "subheadline": {
+      "size": "clamp or px value", 
+      "weight": "normal",
+      "case": "lowercase",
+      "style": "smaller refined text under headline"
+    },
+    "badge_text": {
+      "size": "px value",
+      "case": "lowercase",
+      "style": "paper strip badge at top"
+    }
+  },
+  "effects": ["specific list: distressed texture, halftone pattern on images, paper strip banner, grit/noise overlay, etc."],
+  "button": {
+    "bg": "#hex — button background",
+    "text": "#hex — button text color",
+    "border_radius": "px value",
+    "padding": "vertical horizontal in px",
+    "font_weight": "bold/normal",
+    "case": "uppercase"
+  },
+  "input_field": {
+    "bg": "#hex or transparent",
+    "border": "1px solid #hex",
+    "text": "#hex placeholder color",
+    "padding": "px value"
+  },
+  "pricing": {
+    "strikethrough_color": "#hex",
+    "current_color": "#hex accent color",
+    "font_size": "px value for prices"
+  },
+  "layout": {
+    "hero_structure": "two-column: text left, character image right",
+    "alignment": "left-aligned text, etc",
+    "max_width": "max content width in px"
+  },
+  "hero_image_style": "describe the character image treatment: halftone, black and white, gritty, knight helmet, etc.",
+  "generated_css": "DO NOT WRITE CSS YET. Write detailed CSS SPECIFICATION listing every rule needed: font imports, :root variables for all colors, body defaults (bg, color, font), .hero-section layout, .badge for paper strip, .headline with uppercase bold, .accent-word for green highlight words, .email-input with border style, .btn-accent with exact button styling, .pricing-original with strikethrough, .pricing-current with accent color, .hero-image with halftone/dot pattern, .noise-overlay for grit texture, responsive breakpoints."
+}"""
     steps_log.append("1/5: Analyzing design image...")
     try:
         vision_response = _claude_generate(vision_prompt, 
@@ -673,6 +726,58 @@ Return a JSON object with these keys:
 
     theme_css = design_data.get("generated_css", "")
     steps_log.append("1/5: ✓ Design DNA extracted")
+
+    # ── Step 1.5: Generate Theme CSS from Design Spec ──
+    steps_log.append("1.5/5: Generating theme CSS...")
+    css_spec = design_data.get("generated_css", "")
+    palette = design_data.get("palette", {})
+    typography = design_data.get("typography", {})
+    effects = design_data.get("effects", [])
+    button = design_data.get("button", {})
+    input_field = design_data.get("input_field", {})
+    pricing = design_data.get("pricing", {})
+    layout = design_data.get("layout", {})
+
+    css_prompt = f"""Generate PRODUCTION-READY theme CSS that EXACTLY matches this design specification.
+
+## Design Tokens
+Palette: {json.dumps(palette)}
+Typography: {json.dumps(typography)}
+Effects: {json.dumps(effects)}
+Button: {json.dumps(button)}
+Input: {json.dumps(input_field)}
+Pricing: {json.dumps(pricing)}
+Layout: {json.dumps(layout)}
+
+## CSS Specification (from vision analysis)
+{css_spec}
+
+## OUTPUT RULES
+- Generate COMPLETE CSS — every class needed for a full landing page
+- Include @import for Google Fonts (use Inter for body, Plus Jakarta Sans or Bebas Neue for headings)
+- :root variables for ALL colors from the palette
+- Body defaults: background, color, font-family, antialiasing
+- .hero-section: two-column grid layout, left text right image
+- .badge: beige paper strip at top, lowercase text, distressed/rough edge feel
+- .headline: uppercase, bold, letter-spacing, color from text_primary, with .accent class for green highlight words
+- .subheadline: lowercase, smaller, muted color
+- .email-input: exact border/background/padding from input_field spec
+- .btn-accent: exact background/text/border-radius/padding from button spec, uppercase, bold
+- .pricing-original: strikethrough, muted color, smaller
+- .pricing-current: accent color, bold, larger
+- .hero-image: CSS halftone/dot pattern effect, or filter for gritty look
+- .noise-overlay: subtle noise/grit texture via CSS pseudo-elements or background-image data URI
+- .section: consistent vertical padding, max-width container
+- Responsive: stack to single column on mobile
+- All colors MUST use the exact hex values from the palette
+
+Return ONLY the CSS. No markdown, no explanations, no HTML."""
+    try:
+        theme_css = _claude_generate(css_prompt, "Generate the theme CSS.", max_tokens=4000)
+        steps_log.append("1.5/5: ✓ Theme CSS generated")
+    except Exception as e:
+        steps_log.append(f"1.5/5: ⚠ CSS gen failed, using spec as fallback")
+        theme_css = css_spec  # fallback to the spec text
 
     # ── Step 2: Content Extraction ──
     steps_log.append("2/5: Extracting site content...")
@@ -688,8 +793,8 @@ Return a JSON object with these keys:
         body_html = re.sub(r'<script[\s\S]*?</script>', '', body_html, flags=re.IGNORECASE)
         body_html = re.sub(r'<style[\s\S]*?</style>', '', body_html, flags=re.IGNORECASE)
         # Truncate for AI — need enough for all sections
-        body_html = body_html[:30000]
-        steps_log.append("2/5: ✓ Content extracted ({:,} chars)".format(len(body_html)))
+        site_content = body_html[:30000]
+        steps_log.append("2/5: ✓ Content extracted ({:,} chars)".format(len(site_content)))
     except Exception as e:
         return jsonify({"error": f"Content extraction failed: {e}", "steps": steps_log}), 500
 
@@ -722,16 +827,24 @@ Return a JSON object with these keys:
     steps_log.append("5/5: Assembling site with new theme...")
     assembly_prompt = f"""You are rebuilding an entire website with a new visual design while preserving all the original CONTENT.
 
-## NEW THEME (Authoritative)
+## DESIGN TOKENS (from vision analysis — authoritative)
+- Mood: {json.dumps(design_data.get('mood', ''))}
+- Palette: {json.dumps(palette)}
+- Typography: {json.dumps(typography)}
+- Effects: {json.dumps(effects)}
+- Layout: {json.dumps(layout)}
+- Hero image style: {json.dumps(design_data.get('hero_image_style', ''))}
+
+## THEME CSS (Authoritative — use these exact class names)
 ```css
-{theme_css[:3000]}
+{theme_css}
 ```
 
 ## NEW HERO IMAGE
-{hero_image_path or 'No hero image available — use CSS background instead.'}
+{hero_image_path or 'No hero image — use CSS background gradient matching the palette.'}
 
 ## NEW HERO VIDEO
-{hero_video_path or 'No video available.'}
+{hero_video_path or 'No video.'}
 
 ## ORIGINAL SITE CONTENT (Preserve ALL text, links, forms, and structure)
 ```html
@@ -740,16 +853,16 @@ Return a JSON object with these keys:
 
 ## YOUR TASK
 Rebuild the entire site as a single HTML page. CRITICAL RULES:
-1. Use the NEW THEME CSS classes for ALL styling — do NOT keep any old colors, fonts, or backgrounds
-2. Preserve EVERY section, EVERY paragraph, EVERY link, EVERY form from the original — DO NOT truncate or omit anything
-3. Include ALL feature sections (AI food analysis, rules engine, SigmaChef, workout tracking, etc.)
-4. Preserve all form elements exactly — method, action, input names, placeholders
-5. If a hero image was generated, use it as the hero background
-6. Add appropriate wb-section classes and data attributes for GrapesJS
-7. Fix any broken image references — replace old site paths with working ones, or remove broken images
-8. Output the COMPLETE page — nothing omitted
+1. Use the THEME CSS classes for EVERY element — .hero-section, .badge, .headline, .accent, .subheadline, .email-input, .btn-accent, .pricing-original, .pricing-current, .hero-image, .noise-overlay, .section
+2. The .headline text should be UPPERCASE with .accent class on the key highlight word (e.g., <span class="accent">CODE</span>)
+3. The .badge class creates the beige paper strip effect — use it for the top tagline
+4. Preserve EVERY section from the original — hero, features, pricing, footer, EVERYTHING
+5. Preserve ALL form elements exactly — method, action, input names, placeholders — the waitlist form must work
+6. Remove or replace broken image URLs (like images/ from old site)
+7. Hero layout: two columns — text left, {hero_image_path and 'hero image right' or 'CSS background right'}
+8. Include the noise overlay for gritty texture
 
-Return ONLY the complete HTML (no markdown, no explanations). The output goes directly into GrapesJS and must render perfectly standalone."""
+Return ONLY the complete HTML (no markdown, no explanations). The page MUST look exactly like the design tokens describe."""
 
     try:
         full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=16000)
