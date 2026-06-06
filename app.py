@@ -728,9 +728,7 @@ Return ONLY the CSS. No markdown, no explanations, no HTML. Every hex color must
     steps_log.append("3/5: Generating hero image...")
     hero_image_path = ""
     try:
-        hero_style = design_data.get("hero_image_style", "")
-        mood = design_data.get("mood", "dark gritty industrial")
-        img_prompt = f"Dark heroic character portrait. {hero_style}. {mood}. High contrast black and white, halftone dot pattern effect, grunge texture overlay. No text, no UI elements. Cinematic lighting from side. 16:9. Professional quality suitable for website hero background."
+        img_prompt = "Dark heroic character portrait. Knight in armor, high contrast black and white, halftone dot pattern effect, grunge texture overlay. No text, no UI elements. Cinematic side lighting. Dark gritty industrial aesthetic. 16:9. Professional quality website hero background."
         hero_image_path = _generate_image(img_prompt)
         steps_log.append(f"3/5: ✓ Hero image generated")
     except Exception as e:
@@ -741,7 +739,7 @@ Return ONLY the CSS. No markdown, no explanations, no HTML. Every hex color must
     if generate_video:
         steps_log.append("4/5: Generating hero video...")
         try:
-            vid_prompt = f"Slow cinematic push-in on a dark armored figure. {mood}. Dust particles floating in dramatic side lighting. High contrast black and white. No text, no faces visible clearly. Haunting atmosphere. Seamless loop feel. 6 seconds."
+            vid_prompt = "Slow cinematic push-in on a dark armored knight figure. Dust particles floating in dramatic side lighting. High contrast black and white. Haunting gritty atmosphere. Seamless loop. 6 seconds. No text."
             hero_video_path = _generate_video(vid_prompt)
             steps_log.append("4/5: ✓ Hero video generated")
         except Exception as e:
