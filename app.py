@@ -762,27 +762,66 @@ def ai_refine_hero():
     
     Body: {
         "design_image_url": "https://...",
+        "seed_html": "<style>...</style><section>...</section>",  // optional — skip extraction+gen, start from this HTML
         "project_id": "hero-refine",          // optional, default auto-generated
         "page_id": "home",                     // optional
-        "max_iterations": 3,                   // optional, default 3
+        "max_iterations": 3,                   // optional, default 3, max 5
         "hero_video_url": "https://...",       // optional
-        "hero_image_url": "https://..."        // optional
+        "hero_image_url": "https://...",       // optional
+        "whatfontis_api_key": "..."            // optional — enables font detection
     }
     """
     data = request.get_json() or {}
     design_image_url = data.get("design_image_url", "")
+    seed_html = data.get("seed_html", "")
     project_id = data.get("project_id", f"refine-{uuid.uuid4().hex[:8]}")
     page_id = data.get("page_id", "home")
     max_iterations = min(data.get("max_iterations", 3), 5)
     video_asset = data.get("hero_video_url") or data.get("hero_image_url", "")
+    wfi_key = data.get("whatfontis_api_key", "")
     
     if not design_image_url:
         return jsonify({"error": "design_image_url is required"}), 400
     
     iterations_log = []
+    current_html = seed_html  # may be empty → will generate below
     
-    # ── Step 1: Vision → extract EXACT layout spec ──
-    vision_prompt = """You are a forensic UI analyst. Look at this design image and describe the EXACT pixel-level layout as a rigid specification. Output ONLY this JSON structure — no markdown, no explanations:
+    # ── If seed_html provided, skip extraction + generation ──
+    if seed_html:
+        iterations_log.append({"step": "seeded", "status": "ok", "note": "Starting from provided seed HTML"})
+    
+    # ── Font detection via WhatFontIs (if key provided) ──
+    detected_fonts = {}
+    if wfi_key:
+        try:
+            import requests as req_lib
+            wfi_resp = req_lib.post("https://www.whatfontis.com/api2/", data={
+                "API_KEY": wfi_key,
+                "IMAGEBASE64": "0",
+                "urlimage": design_image_url,
+                "FREEFONTS": "1",
+                "limit": "10",
+                "NOTTEXTBOXSDETECTION": "0"
+            }, timeout=30)
+            if wfi_resp.status_code == 200:
+                fonts = wfi_resp.json()
+                if isinstance(fonts, list):
+                    detected_fonts = {f["title"].lower(): f for f in fonts[:10]}
+                iterations_log.append({"step": "font_detect", "status": "ok", "fonts_found": len(detected_fonts)})
+            else:
+                iterations_log.append({"step": "font_detect", "status": "error", "error": wfi_resp.text[:200]})
+        except Exception as e:
+            iterations_log.append({"step": "font_detect", "status": "error", "error": str(e)[:200]})
+    
+    # ── Step 1+2: Extract spec + generate HTML (only if no seed) ──
+    if not seed_html:
+        # Font hint for the spec prompt if we have detected fonts
+        font_hint = ""
+        if detected_fonts:
+            font_names = list(detected_fonts.keys())[:5]
+            font_hint = f"\nDETECTED FONTS (use exact names): {', '.join(font_names)}"
+        
+        vision_prompt = """You are a forensic UI analyst. Look at this design image and describe the EXACT pixel-level layout as a rigid specification. Output ONLY this JSON structure — no markdown, no explanations:
 
 {
   "canvas": {"bg_color": "#hex", "texture": "description"},
@@ -793,22 +832,30 @@ def ai_refine_hero():
   "pricing": {"lines": [{"text": "exact text", "color": "#hex", "strikethrough": true|false, "opacity": "X"}]},
   "hero_image_treatment": {"effect": "grayscale|halftone|normal", "contrast": "X", "position": "right|left", "width_percent": "X", "proximity_to_text": "close|far"},
   "layout": {"columns": 2, "text_side": "left", "image_side": "right", "vertical_center": true, "gap": "Xpx", "padding": "Xpx"}
-}"""
+}""" + font_hint
 
-    try:
-        spec_json = _claude_generate(vision_prompt, [
-            {"type": "text", "text": "Extract the exact layout from this design."},
-            {"type": "image", "source": {"type": "url", "url": design_image_url}}
-        ], max_tokens=2000)
-        if spec_json.startswith("```"):
-            spec_json = spec_json.split("\n", 1)[1].rsplit("```", 1)[0]
-        spec = json.loads(spec_json)
-        iterations_log.append({"step": "extract_spec", "status": "ok"})
-    except Exception as e:
-        return jsonify({"error": f"Vision extraction failed: {e}"}), 500
+        try:
+            spec_json = _claude_generate(vision_prompt, [
+                {"type": "text", "text": "Extract the exact layout from this design."},
+                {"type": "image", "source": {"type": "url", "url": design_image_url}}
+            ], max_tokens=2000)
+            if spec_json.startswith("```"):
+                spec_json = spec_json.split("\n", 1)[1].rsplit("```", 1)[0]
+            spec = json.loads(spec_json)
+            iterations_log.append({"step": "extract_spec", "status": "ok"})
+        except Exception as e:
+            return jsonify({"error": f"Vision extraction failed: {e}"}), 500
 
-    # ── Step 2: Generate initial HTML ──
-    build_prompt = f"""You are a pixel-perfect web developer. Copy this EXACT layout specification into HTML/CSS. Do NOT improvise, do NOT redesign.
+        # Override font_family in spec with detected fonts if available
+        if detected_fonts:
+            for word in spec.get("headline", {}).get("words", []):
+                word_family = word.get("font_family", "").lower()
+                for df_name in detected_fonts:
+                    if df_name in word_family or word_family in df_name:
+                        word["font_family"] = detected_fonts[df_name]["title"]
+                        iterations_log.append({"step": "font_override", "word": word["text"], "font": detected_fonts[df_name]["title"]})
+
+        build_prompt = f"""You are a pixel-perfect web developer. Copy this EXACT layout specification into HTML/CSS. Do NOT improvise, do NOT redesign.
 
 ## RIGID LAYOUT SPECIFICATION
 ```json
@@ -824,28 +871,31 @@ Hero video/image: {video_asset or 'NONE — use a dark gradient'}
 3. If badge has torn_edge: true, use CSS clip-path for a jagged right edge on the green segment
 4. Input text-align must match spec's text_align
 5. CTA button must have gap_from_input px gap from the input
-6. Use Bebas Neue for "FOLLOW" / "THE", Cinzel Black (900) for "CODE."
+6. Use the EXACT font_family names from the spec for each text element — do NOT substitute
 7. Add SVG white film grain texture over the background (feTurbulence + screen blend)
 8. Add halftone dot overlay on the knight image if specified
 9. Return ONLY <style> + <section> — NO DOCTYPE, NO html/head/body tags
 10. Striped badge: use two <span> elements side by side — first with left_bg, second with right_bg"""
 
-    try:
-        hero_html = _claude_generate(build_prompt, "Build the hero section.", max_tokens=4000)
-        if hero_html.startswith("```"):
-            lines = hero_html.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            hero_html = "\n".join(lines)
-        iterations_log.append({"step": "generate_initial", "status": "ok"})
-    except Exception as e:
-        return jsonify({"error": f"HTML generation failed: {e}"}), 500
-
-    # ── Step 3-6: Refinement loop ──
-    current_html = hero_html
-    best_html = hero_html
+        try:
+            hero_html = _claude_generate(build_prompt, "Build the hero section.", max_tokens=4000)
+            if hero_html.startswith("```"):
+                lines = hero_html.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                hero_html = "\n".join(lines)
+            iterations_log.append({"step": "generate_initial", "status": "ok"})
+        except Exception as e:
+            return jsonify({"error": f"HTML generation failed: {e}"}), 500
+        
+        current_html = hero_html
+    
+    if not current_html:
+        return jsonify({"error": "No HTML to refine. Provide seed_html or ensure design_image_url is valid."}), 400
+    
+    best_html = current_html
     best_score = 0
     
     for iteration in range(max_iterations):
