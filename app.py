@@ -1015,12 +1015,12 @@ Hero video/image: {video_asset or 'NONE — use a dark gradient'}
         compare_prompt = f"""{known_compare}You are a pixel-level QA inspector. Compare the ORIGINAL design image with the RENDERED screenshot. List EVERY discrepancy, no matter how small.
 
 Output ONLY a JSON object:
-{
+{{
   "match_score": 0-100,
   "discrepancies": [
-    {"element": "badge|headline|input|button|pricing|knight|spacing|texture|color|font", "description": "specific issue", "severity": "high|medium|low"}
+    {{"element": "badge|headline|input|button|pricing|knight|spacing|texture|color|font", "description": "specific issue", "severity": "high|medium|low"}}
   ]
-}
+}}
 
 If match_score >= 95, set discrepancies to empty array []."""
 
