@@ -3,7 +3,7 @@
 GrapesJS Projects API — WebBeagle Builder
 Serves: project CRUD, multi-page management, preview rendering,
         AI section generation (Claude Sonnet 4), AI redesign (vision + KIE assets),
-        KIE image & video generation
+        KIE image & video generation, closed-loop hero refinement (vision + screenshot + compare + fix)
 """
 import json
 import os
@@ -82,14 +82,9 @@ def _kie_submit(model: str, input_params: dict, callBackUrl: str = None) -> str:
     raise Exception(f"KIE submit error: {data}")
 
 def _kie_poll(taskId: str, model: str, timeout: int = 300) -> dict:
-    """Poll for task completion. Returns {resultImageUrl, resultVideoUrl, ...}."""
-    # Determine query endpoint based on model family
-    if "grok" in model:
-        query_url = f"{KIE_BASE}/grok/record-info?taskId={taskId}"
-    elif "flux" in model:
-        query_url = f"{KIE_BASE}/flux/kontext/record-info?taskId={taskId}"
-    else:
-        query_url = f"{KIE_BASE}/jobs/taskStatus?taskId={taskId}"
+    """Poll for task completion. Returns {resultImageUrl, resultVideoUrl, ...}.
+    Uses the UNIFIED query endpoint for all Market models."""
+    query_url = f"{KIE_BASE}/jobs/recordInfo?taskId={taskId}"
     
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -99,16 +94,26 @@ def _kie_poll(taskId: str, model: str, timeout: int = 300) -> dict:
             timeout=10
         )
         data = r.json()
-        # Check for success
-        success_flag = data.get("data", {}).get("successFlag")
-        if success_flag == 1:
-            response_data = data.get("data", {}).get("response", {})
+        task_data = data.get("data", {})
+        state = task_data.get("state", "")
+        
+        if state == "success":
+            # Results are in resultJson — a JSON-encoded string with resultUrls array
+            result_json_str = task_data.get("resultJson", "{}")
+            try:
+                result_data = json.loads(result_json_str)
+            except json.JSONDecodeError:
+                result_data = {}
+            result_urls = result_data.get("resultUrls", [])
+            # First URL is typically the image, second might be video
             return {
-                "resultImageUrl": response_data.get("resultImageUrl"),
-                "resultVideoUrl": response_data.get("resultVideoUrl"),
+                "resultImageUrl": result_urls[0] if len(result_urls) > 0 else None,
+                "resultVideoUrl": result_urls[1] if len(result_urls) > 1 else None,
             }
-        elif success_flag in (2, 3):
-            raise Exception(f"KIE task failed: {data}")
+        elif state == "fail":
+            fail_msg = task_data.get("failMsg", "Unknown error")
+            raise Exception(f"KIE task failed: {fail_msg}")
+        # waiting, queuing, generating — keep polling
         time.sleep(3)
     raise Exception(f"KIE task {taskId} timed out after {timeout}s")
 
@@ -124,7 +129,7 @@ def _generate_image(prompt: str, aspect_ratio: str = "16:9", model: str = "grok-
     Returns empty string on timeout (graceful degradation)."""
     try:
         taskId = _kie_submit(model, {"prompt": prompt, "aspect_ratio": aspect_ratio})
-        info = _kie_poll(taskId, model, timeout=120)  # 2 min timeout
+        info = _kie_poll(taskId, model, timeout=300)  # 5 min — Grok Imagine can be slow
         img_url = info.get("resultImageUrl")
         if not img_url:
             return ""
@@ -134,14 +139,15 @@ def _generate_image(prompt: str, aspect_ratio: str = "16:9", model: str = "grok-
         print(f"[KIE image] {e}")
         return ""
 
-def _generate_video(prompt: str, aspect_ratio: str = "16:9", duration: str = "5",
-                    model: str = "grok-imagine/text-to-video") -> str:
+def _generate_video(prompt: str, aspect_ratio: str = "16:9", duration: str = "6",
+                    model: str = "grok-imagine/text-to-video", resolution: str = "480p") -> str:
     """Generate video via KIE, download to assets, return public URL path."""
     taskId = _kie_submit(model, {
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
+        "mode": "normal",
         "duration": duration,
-        "resolution": "720p"
+        "resolution": resolution
     })
     info = _kie_poll(taskId, model, timeout=300)
     vid_url = info.get("resultVideoUrl")
@@ -492,13 +498,24 @@ def _claude_generate(system_msg: str, user_msg, max_tokens: int = 4000) -> str:
         user_content = []
         for block in user_msg:
             if block.get("type") == "image":
-                user_content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "url",
-                        "url": block["source"]["url"]
-                    }
-                })
+                src = block["source"]
+                if src.get("type") == "base64":
+                    user_content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": src.get("media_type", "image/png"),
+                            "data": src["data"]
+                        }
+                    })
+                else:
+                    user_content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": src.get("url", "")
+                        }
+                    })
             else:
                 user_content.append(block)
 
@@ -627,7 +644,339 @@ Generate a single self-contained HTML section based on the user's request. If th
         return jsonify({"error": str(e)}), 500
 
 # ══════════════════════════════════════════════════════════════
-#  AI — Full Site Redesign
+#  AI — Pixel-Perfect Section (Rigid Template)
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/api/ai/perfect-hero", methods=["POST"])
+def ai_perfect_hero():
+    """
+    Generate a pixel-perfect hero section from a design image.
+    Uses vision to extract the EXACT layout, then Claude copies it rigidly.
+    Uses existing video/image assets (no regeneration).
+    """
+    data = request.get_json() or {}
+    design_image_url = data.get("design_image_url", "")
+    hero_video_url = data.get("hero_video_url", "")
+    hero_image_url = data.get("hero_image_url", "")
+    
+    if not design_image_url:
+        return jsonify({"error": "design_image_url is required"}), 400
+    
+    video_asset = hero_video_url or hero_image_url or ""
+    
+    # Step 1: Vision → extract EXACT layout spec
+    vision_prompt = """You are a forensic UI analyst. Look at this design image and describe the EXACT pixel-level layout as a rigid specification. Output ONLY this JSON structure — no markdown, no explanations:
+
+{
+  "canvas": {"bg_color": "#hex", "texture": "description"},
+  "badge": {"text": "exact text", "bg_color": "#hex", "text_color": "#hex", "position": "top-left|top-center", "font_size": "Xpx", "padding": "Xpx Ypx", "text_transform": "lowercase|uppercase", "underline_color": "#hex or null", "underline_word": "which word gets underline"},
+  "headline": {"words": [{"text": "FOLLOW", "color": "#hex"}, {"text": "THE", "color": "#hex"}, {"text": "CODE.", "color": "#hex"}], "font_family": "name", "font_size": "Xpx", "font_weight": "bold|normal", "text_transform": "uppercase|lowercase", "letter_spacing": "Xpx", "line_height": "X", "position": "left|center"},
+  "email_input": {"placeholder": "exact text", "border_color": "#hex", "border_width": "Xpx", "bg_color": "#hex", "text_color": "#hex", "width": "Xpx", "height": "Xpx", "font_size": "Xpx"},
+  "cta_button": {"text": "JOIN WAITLIST", "bg_color": "#hex", "text_color": "#hex", "border_radius": "Xpx", "padding": "Xpx Ypx", "font_size": "Xpx", "font_weight": "bold|normal", "position": "right of input|below input"},
+  "pricing": {"lines": [{"text": "exact text", "color": "#hex", "strikethrough": true|false}]},
+  "hero_image_treatment": {"effect": "grayscale|halftone|normal", "contrast": "X", "position": "right|left", "width_percent": "X"},
+  "layout": {"columns": 2, "text_side": "left", "image_side": "right", "vertical_center": true, "gap": "Xpx", "padding": "Xpx"}
+}"""
+
+    try:
+        spec_json = _claude_generate(vision_prompt, [
+            {"type": "text", "text": "Extract the exact layout from this design."},
+            {"type": "image", "source": {"type": "url", "url": design_image_url}}
+        ], max_tokens=2000)
+        # Parse JSON
+        if spec_json.startswith("```"):
+            spec_json = spec_json.split("\n", 1)[1].rsplit("```", 1)[0]
+        spec = json.loads(spec_json)
+    except Exception as e:
+        return jsonify({"error": f"Vision extraction failed: {e}"}), 500
+
+    # Step 2: Build rigid HTML/CSS from the spec
+    build_prompt = f"""You are a pixel-perfect web developer. Copy this EXACT layout specification into HTML/CSS. Do NOT improvise, do NOT redesign, do NOT "improve" anything. Copy it exactly.
+
+## RIGID LAYOUT SPECIFICATION
+```json
+{json.dumps(spec, indent=2)}
+```
+
+## ASSETS TO USE
+Hero video/image: {video_asset or 'NONE — use a dark gradient placeholder'}
+
+## ABSOLUTE RULES
+1. EVERY color must be the EXACT hex from the spec — no "similar" colors
+2. EVERY font size, padding, gap must match the spec values exactly
+3. The layout structure (columns, positions) must match exactly
+4. The badge text, headline words, pricing text must be the EXACT text from the spec
+5. If a video URL is provided, use it as the hero background: <video autoplay loop muted playsinline style="...the spec's image_treatment..."><source src="{video_asset}" type="video/mp4"></video>
+6. If only an image URL, use <img> with the spec's image_treatment
+7. Do NOT add any extra sections, text, or elements beyond what the spec defines
+8. Use CSS Grid for the two-column layout with exact px gap/padding from spec
+9. Apply the background texture/noise if specified in canvas.texture
+
+Return ONLY the hero section HTML. No markdown, no explanations."""
+
+    try:
+        hero_html = _claude_generate(build_prompt, "Build the hero section matching this exact spec.", max_tokens=4000)
+        if hero_html.startswith("```"):
+            lines = hero_html.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            hero_html = "\n".join(lines)
+    except Exception as e:
+        return jsonify({"error": f"HTML generation failed: {e}"}), 500
+
+    return jsonify({
+        "html": hero_html,
+        "spec": spec,
+        "video_url": video_asset
+    })
+
+# ══════════════════════════════════════════════════════════════
+#  AI — Closed-Loop Hero Refinement
+# ══════════════════════════════════════════════════════════════
+
+def _take_screenshot_b64(url: str, timeout: int = 15) -> str:
+    """Take a screenshot of a URL and return as base64 data URL."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError("playwright not installed. Run: pip install playwright && playwright install chromium")
+    
+    import base64
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+        # Wait for fonts to load
+        page.wait_for_timeout(2000)
+        screenshot = page.screenshot(full_page=False)
+        browser.close()
+    return f"data:image/png;base64,{base64.b64encode(screenshot).decode()}"
+
+
+@app.route("/api/ai/refine-hero", methods=["POST"])
+def ai_refine_hero():
+    """
+    Closed-loop refinement: design image → generate → deploy → screenshot → compare → fix → repeat.
+    
+    Body: {
+        "design_image_url": "https://...",
+        "project_id": "hero-refine",          // optional, default auto-generated
+        "page_id": "home",                     // optional
+        "max_iterations": 3,                   // optional, default 3
+        "hero_video_url": "https://...",       // optional
+        "hero_image_url": "https://..."        // optional
+    }
+    """
+    data = request.get_json() or {}
+    design_image_url = data.get("design_image_url", "")
+    project_id = data.get("project_id", f"refine-{uuid.uuid4().hex[:8]}")
+    page_id = data.get("page_id", "home")
+    max_iterations = min(data.get("max_iterations", 3), 5)
+    video_asset = data.get("hero_video_url") or data.get("hero_image_url", "")
+    
+    if not design_image_url:
+        return jsonify({"error": "design_image_url is required"}), 400
+    
+    iterations_log = []
+    
+    # ── Step 1: Vision → extract EXACT layout spec ──
+    vision_prompt = """You are a forensic UI analyst. Look at this design image and describe the EXACT pixel-level layout as a rigid specification. Output ONLY this JSON structure — no markdown, no explanations:
+
+{
+  "canvas": {"bg_color": "#hex", "texture": "description"},
+  "badge": {"text_left": "exact text on left segment", "text_right": "exact text on right segment", "left_bg": "#hex", "right_bg": "#hex", "text_color": "#hex", "right_text_color": "#hex", "position": "top-left|top-center", "font_size": "Xpx", "padding": "Xpx Ypx", "torn_edge": true|false, "font_family": "name"},
+  "headline": {"words": [{"text": "FOLLOW", "color": "#hex", "font_family": "name"}, {"text": "THE", "color": "#hex", "font_family": "name"}, {"text": "CODE.", "color": "#hex", "font_family": "name"}], "font_size": "Xpx", "text_transform": "uppercase", "letter_spacing": "Xpx", "line_height": "X"},
+  "email_input": {"placeholder": "exact text", "border_color": "#hex", "border_width": "Xpx", "bg_color": "#hex", "text_color": "#hex", "width": "Xpx", "height": "Xpx", "font_size": "Xpx", "text_align": "left|center", "border_radius": "Xpx"},
+  "cta_button": {"text": "exact text", "bg_color": "#hex", "text_color": "#hex", "border_radius": "Xpx", "padding": "Xpx Ypx", "font_size": "Xpx", "font_weight": "bold|normal", "gap_from_input": "Xpx"},
+  "pricing": {"lines": [{"text": "exact text", "color": "#hex", "strikethrough": true|false, "opacity": "X"}]},
+  "hero_image_treatment": {"effect": "grayscale|halftone|normal", "contrast": "X", "position": "right|left", "width_percent": "X", "proximity_to_text": "close|far"},
+  "layout": {"columns": 2, "text_side": "left", "image_side": "right", "vertical_center": true, "gap": "Xpx", "padding": "Xpx"}
+}"""
+
+    try:
+        spec_json = _claude_generate(vision_prompt, [
+            {"type": "text", "text": "Extract the exact layout from this design."},
+            {"type": "image", "source": {"type": "url", "url": design_image_url}}
+        ], max_tokens=2000)
+        if spec_json.startswith("```"):
+            spec_json = spec_json.split("\n", 1)[1].rsplit("```", 1)[0]
+        spec = json.loads(spec_json)
+        iterations_log.append({"step": "extract_spec", "status": "ok"})
+    except Exception as e:
+        return jsonify({"error": f"Vision extraction failed: {e}"}), 500
+
+    # ── Step 2: Generate initial HTML ──
+    build_prompt = f"""You are a pixel-perfect web developer. Copy this EXACT layout specification into HTML/CSS. Do NOT improvise, do NOT redesign.
+
+## RIGID LAYOUT SPECIFICATION
+```json
+{json.dumps(spec, indent=2)}
+```
+
+## ASSETS TO USE
+Hero video/image: {video_asset or 'NONE — use a dark gradient'}
+
+## ABSOLUTE RULES
+1. Every color must be the EXACT hex from the spec
+2. Every font size, padding, gap must match exactly
+3. If badge has torn_edge: true, use CSS clip-path for a jagged right edge on the green segment
+4. Input text-align must match spec's text_align
+5. CTA button must have gap_from_input px gap from the input
+6. Use Bebas Neue for "FOLLOW" / "THE", Cinzel Black (900) for "CODE."
+7. Add SVG white film grain texture over the background (feTurbulence + screen blend)
+8. Add halftone dot overlay on the knight image if specified
+9. Return ONLY <style> + <section> — NO DOCTYPE, NO html/head/body tags
+10. Striped badge: use two <span> elements side by side — first with left_bg, second with right_bg"""
+
+    try:
+        hero_html = _claude_generate(build_prompt, "Build the hero section.", max_tokens=4000)
+        if hero_html.startswith("```"):
+            lines = hero_html.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            hero_html = "\n".join(lines)
+        iterations_log.append({"step": "generate_initial", "status": "ok"})
+    except Exception as e:
+        return jsonify({"error": f"HTML generation failed: {e}"}), 500
+
+    # ── Step 3-6: Refinement loop ──
+    current_html = hero_html
+    best_html = hero_html
+    best_score = 0
+    
+    for iteration in range(max_iterations):
+        # Save current HTML to project
+        try:
+            meta = _load_meta(project_id)
+            if not meta:
+                meta = {"name": f"Refine {project_id}", "created": datetime.utcnow().isoformat(), "pages": [], "theme_css": ""}
+            pp = _page_path(project_id, page_id)
+            pp.parent.mkdir(parents=True, exist_ok=True)
+            existing = {}
+            if pp.exists():
+                existing = json.loads(pp.read_text())
+            existing["components"] = current_html
+            pp.write_text(json.dumps(existing, indent=2))
+            if page_id not in meta.get("pages", []):
+                meta.setdefault("pages", []).append(page_id)
+            meta["updated"] = datetime.utcnow().isoformat()
+            _save_meta(project_id, meta)
+        except Exception as e:
+            iterations_log.append({"step": f"save_iter{iteration}", "status": "error", "error": str(e)})
+            break
+        
+        preview_url = f"https://{project_id}.preview.webbeagle.com/{page_id}/"
+        
+        # Take screenshot of preview
+        try:
+            screenshot_b64 = _take_screenshot_b64(preview_url)
+            iterations_log.append({"step": f"screenshot_iter{iteration}", "status": "ok"})
+        except Exception as e:
+            iterations_log.append({"step": f"screenshot_iter{iteration}", "status": "error", "error": str(e)})
+            # Continue with what we have — can't compare without screenshot
+            break
+        
+        # Compare: original vs screenshot → list discrepancies
+        compare_prompt = """You are a pixel-level QA inspector. Compare the ORIGINAL design image with the RENDERED screenshot. List EVERY discrepancy, no matter how small.
+
+Output ONLY a JSON object:
+{
+  "match_score": 0-100,
+  "discrepancies": [
+    {"element": "badge|headline|input|button|pricing|knight|spacing|texture|color|font", "description": "specific issue", "severity": "high|medium|low"}
+  ]
+}
+
+If match_score >= 95, set discrepancies to empty array []."""
+
+        try:
+            compare_result = _claude_generate(compare_prompt, [
+                {"type": "text", "text": "ORIGINAL DESIGN (reference):"},
+                {"type": "image", "source": {"type": "url", "url": design_image_url}},
+                {"type": "text", "text": "RENDERED SCREENSHOT (what we built):"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": screenshot_b64.split(",", 1)[1] if "," in screenshot_b64 else screenshot_b64}}
+            ], max_tokens=1500)
+            
+            if compare_result.startswith("```"):
+                compare_result = compare_result.split("\n", 1)[1].rsplit("```", 1)[0]
+            comparison = json.loads(compare_result)
+            score = comparison.get("match_score", 0)
+            discrepancies = comparison.get("discrepancies", [])
+            
+            iterations_log.append({
+                "step": f"compare_iter{iteration}",
+                "status": "ok",
+                "score": score,
+                "discrepancy_count": len(discrepancies)
+            })
+            
+            if score > best_score:
+                best_html = current_html
+                best_score = score
+            
+            # If close enough or no discrepancies, stop
+            if score >= 95 or not discrepancies:
+                iterations_log.append({"step": "done", "reason": "match_threshold" if score >= 95 else "no_discrepancies"})
+                break
+                
+        except Exception as e:
+            iterations_log.append({"step": f"compare_iter{iteration}", "status": "error", "error": str(e)})
+            break
+        
+        # Fix: apply discrepancies to generate corrected HTML
+        fix_prompt = f"""Fix this hero section HTML to address ALL of these discrepancies. The original design is the reference.
+
+## DISCREPANCIES TO FIX
+{json.dumps(discrepancies, indent=2)}
+
+## CURRENT HTML
+```html
+{current_html}
+```
+
+## RULES
+1. Fix ONLY the listed discrepancies — don't change anything else
+2. Match the original design exactly
+3. Return ONLY the complete corrected <style> + <section> HTML
+4. No markdown, no explanations"""
+
+        try:
+            fixed_html = _claude_generate(fix_prompt, [
+                {"type": "text", "text": "Fix these specific discrepancies. Reference the original design:"},
+                {"type": "image", "source": {"type": "url", "url": design_image_url}}
+            ], max_tokens=4000)
+            
+            if fixed_html.startswith("```"):
+                lines = fixed_html.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                fixed_html = "\n".join(lines)
+            
+            current_html = fixed_html
+            iterations_log.append({"step": f"fix_iter{iteration}", "status": "ok"})
+            
+        except Exception as e:
+            iterations_log.append({"step": f"fix_iter{iteration}", "status": "error", "error": str(e)})
+            break
+    
+    # ── Return final result ──
+    return jsonify({
+        "html": best_html,
+        "preview_url": f"https://{project_id}.preview.webbeagle.com/{page_id}/",
+        "project_id": project_id,
+        "page_id": page_id,
+        "best_score": best_score,
+        "iterations": iterations_log
+    })
+
+# ══════════════════════════════════════════════════════════════
+#  AI — Full Site Redesign (Legacy — use perfect-hero instead)
 # ══════════════════════════════════════════════════════════════
 
 @app.route("/api/ai/redesign", methods=["POST"])
