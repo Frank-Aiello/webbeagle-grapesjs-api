@@ -829,8 +829,9 @@ def ai_refine_hero():
     page_id = data.get("page_id", "home")
     max_iterations = min(data.get("max_iterations", 3), 5)
     video_asset = data.get("hero_video_url") or data.get("hero_image_url", "")
-    wfi_key = data.get("whatfontis_api_key", "")
-    
+    wfi_key = data.get("whatfontis_api_key") or os.environ.get("WHATFONTIS_API_KEY", "")
+    known = data.get("known", {})  # LOCKED values from onboarding
+
     if not design_image_url:
         return jsonify({"error": "design_image_url is required"}), 400
     
@@ -841,9 +842,9 @@ def ai_refine_hero():
     if seed_html:
         iterations_log.append({"step": "seeded", "status": "ok", "note": "Starting from provided seed HTML"})
     
-    # ── Font detection via WhatFontIs (if key provided) ──
+    # ── Font detection via WhatFontIs (skip if fonts already locked) ──
     detected_fonts = {}
-    if wfi_key:
+    if wfi_key and not known.get("fonts", {}).get("headline"):
         try:
             import requests as req_lib
             wfi_resp = req_lib.post("https://www.whatfontis.com/api2/", data={
@@ -906,6 +907,25 @@ def ai_refine_hero():
                         word["font_family"] = detected_fonts[df_name]["title"]
                         iterations_log.append({"step": "font_override", "word": word["text"], "font": detected_fonts[df_name]["title"]})
 
+        # ── Inject locked values from known spec ──
+        locked_text = ""
+        if known:
+            locked_lines = []
+            kf = known.get("fonts", {})
+            if kf.get("headline"): locked_lines.append(f"  - Headline font: {kf['headline']} (LOCKED — import from Google Fonts, use exact name)")
+            if kf.get("body"): locked_lines.append(f"  - Body font: {kf['body']} (LOCKED — import from Google Fonts, use exact name)")
+            if kf.get("ui"): locked_lines.append(f"  - UI font: {kf['ui']} (LOCKED — use exact name)")
+            if known.get("colors"):
+                locked_lines.append(f"  - Brand colors: {', '.join(known['colors'])} (LOCKED — use these EXACT hex values ONLY)")
+            if known.get("brand_name"):
+                locked_lines.append(f"  - Brand name: {known['brand_name']}")
+            if known.get("cta_text"):
+                locked_lines.append(f"  - CTA button text: {known['cta_text']}")
+            if known.get("voice"):
+                locked_lines.append(f"  - Visual voice: {known['voice']}")
+            if locked_lines:
+                locked_text = "\n## LOCKED VALUES — NEVER OVERRIDE\nThese come from the client's brand spec and override any vision extraction:\n" + "\n".join(locked_lines) + "\n"
+
         build_prompt = f"""You are a pixel-perfect web developer. Copy this EXACT layout specification into HTML/CSS. Do NOT improvise, do NOT redesign.
 
 ## RIGID LAYOUT SPECIFICATION
@@ -913,6 +933,7 @@ def ai_refine_hero():
 {json.dumps(spec, indent=2)}
 ```
 
+{locked_text}
 ## ASSETS TO USE
 Hero video/image: {video_asset or 'NONE — use a dark gradient'}
 
@@ -982,7 +1003,16 @@ Hero video/image: {video_asset or 'NONE — use a dark gradient'}
             break
         
         # Compare: original vs screenshot → list discrepancies
-        compare_prompt = """You are a pixel-level QA inspector. Compare the ORIGINAL design image with the RENDERED screenshot. List EVERY discrepancy, no matter how small.
+        known_compare = ""
+        if known:
+            kp = []
+            if known.get("fonts", {}).get("headline"): kp.append(f"  - Headline font should be: {known['fonts']['headline']} (if rendered uses this, do NOT flag as discrepancy)")
+            if known.get("colors"): kp.append(f"  - Brand colors should be: {', '.join(known['colors'])} (if rendered uses these, do NOT flag)")
+            if known.get("brand_name"): kp.append(f"  - Brand name should be: {known['brand_name']}")
+            if kp:
+                known_compare = "## KNOWN SPEC (do NOT flag these as discrepancies if present)\n" + "\n".join(kp) + "\n\n"
+
+        compare_prompt = f"""{known_compare}You are a pixel-level QA inspector. Compare the ORIGINAL design image with the RENDERED screenshot. List EVERY discrepancy, no matter how small.
 
 Output ONLY a JSON object:
 {
