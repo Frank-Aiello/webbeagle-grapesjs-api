@@ -738,7 +738,7 @@ Return a JSON object with THESE EXACT KEYS. Be specific — every value must mat
     pricing = design_data.get("pricing", {})
     layout = design_data.get("layout", {})
 
-    css_prompt = f"""Generate PRODUCTION-READY theme CSS that EXACTLY matches this design specification.
+    css_prompt = f"""Generate PRODUCTION-READY theme CSS that EXACTLY matches this design specification. This must be 10/10 quality — a site the client cannot refuse.
 
 ## Design Tokens
 Palette: {json.dumps(palette)}
@@ -752,24 +752,35 @@ Layout: {json.dumps(layout)}
 ## CSS Specification (from vision analysis)
 {css_spec}
 
-## OUTPUT RULES
-- Generate COMPLETE CSS — every class needed for a full landing page
-- Include @import for Google Fonts (use Inter for body, Plus Jakarta Sans or Bebas Neue for headings)
-- :root variables for ALL colors from the palette
-- Body defaults: background, color, font-family, antialiasing
-- .hero-section: two-column grid layout, left text right image
-- .badge: beige paper strip at top, lowercase text, distressed/rough edge feel
-- .headline: uppercase, bold, letter-spacing, color from text_primary, with .accent class for green highlight words
-- .subheadline: lowercase, smaller, muted color
-- .email-input: exact border/background/padding from input_field spec
-- .btn-accent: exact background/text/border-radius/padding from button spec, uppercase, bold
-- .pricing-original: strikethrough, muted color, smaller
-- .pricing-current: accent color, bold, larger
-- .hero-image: CSS halftone/dot pattern effect, or filter for gritty look
-- .noise-overlay: subtle noise/grit texture via CSS pseudo-elements or background-image data URI
-- .section: consistent vertical padding, max-width container
-- Responsive: stack to single column on mobile
-- All colors MUST use the exact hex values from the palette
+## OUTPUT RULES — 10/10 QUALITY REQUIRED
+- @import Google Fonts: Inter (400,500,600 weights for body), Bebas Neue (for headings — it's bold, condensed, industrial)
+- :root variables for ALL palette colors — use EXACT hex values from the spec
+- body: font-family MUST be 'Inter', sans-serif (NEVER Arial or generic fallback alone). background: #0a0a0a (true black, not gray-black). color: var(--text-primary). antialiased.
+- .hero-section: display:grid; grid-template-columns:1fr 1fr; min-height:100vh; align-items:center; gap:60px; padding:120px 80px;
+- .badge: background:var(--paper-beige); color:#1a1a1a; display:inline-block; padding:6px 16px; font-size:12px; text-transform:uppercase; letter-spacing:2px; font-weight:600; border-radius:2px; margin-bottom:24px;
+- .headline: font-family:'Bebas Neue',sans-serif; font-size:clamp(3rem,8vw,6rem); font-weight:400; text-transform:uppercase; letter-spacing:2px; line-height:0.9; color:var(--text-primary);
+- .accent: color:var(--accent-green);
+- .subheadline: font-family:'Inter',sans-serif; font-size:1.05rem; color:var(--text-muted); line-height:1.7; max-width:500px;
+- .email-input: background:transparent; border:1px solid var(--text-muted); color:var(--text-primary); padding:14px 20px; font-size:16px; border-radius:4px; width:100%; max-width:360px;
+- .btn-accent: background:var(--accent-green); color:var(--accent-text); border:none; padding:14px 32px; font-size:14px; font-weight:700; text-transform:uppercase; letter-spacing:1px; border-radius:4px; cursor:pointer; transition:opacity 0.2s;
+- .btn-accent:hover: opacity:0.85;
+- .pricing-original: color:var(--text-muted); text-decoration:line-through; font-size:1rem; margin-right:8px;
+- .pricing-current: color:var(--accent-green); font-size:1.5rem; font-weight:700;
+- .hero-image-wrap: position:relative; overflow:hidden;
+- .hero-image-wrap img: width:100%; filter:grayscale(100%) contrast(1.3); mix-blend-mode:lighten;
+- .section: padding:100px 80px; max-width:1400px; margin:0 auto;
+- .section-dark: background:#050505;
+- .noise-overlay: position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:9999; opacity:0.03; background-image:url('data:image/svg+xml,base64,...'); /* subtle noise */
+- h2: font-family:'Bebas Neue',sans-serif; font-size:clamp(2rem,5vw,3.5rem); text-transform:uppercase; letter-spacing:2px; margin-bottom:40px;
+- h3: font-family:'Inter',sans-serif; font-size:1.1rem; font-weight:600; text-transform:uppercase; letter-spacing:1px; color:var(--accent-green); margin-bottom:12px;
+- p: font-family:'Inter',sans-serif; line-height:1.8; color:var(--text-muted); max-width:600px; margin-bottom:20px;
+- .feature-grid: display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:40px;
+- .feature-card: padding:30px; border:1px solid rgba(255,255,255,0.06); border-radius:8px; background:rgba(255,255,255,0.02);
+- .pricing-table: display:flex; gap:24px; justify-content:center; flex-wrap:wrap;
+- .pricing-card: padding:32px; border:1px solid rgba(255,255,255,0.08); border-radius:8px; min-width:220px; text-align:center;
+- Responsive: @media(max-width:768px) .hero-section grid-template-columns:1fr, padding:60px 24px, .section padding:60px 24px, .headline font-size:clamp(2.5rem,10vw,4rem)
+- Include a subtle CSS animation: @keyframes subtle-drift for background texture movement
+- ALL colors EXACTLY match the palette — no creative interpretation
 
 Return ONLY the CSS. No markdown, no explanations, no HTML."""
     try:
@@ -802,9 +813,9 @@ Return ONLY the CSS. No markdown, no explanations, no HTML."""
     steps_log.append("3/5: Generating hero image...")
     hero_image_path = ""
     try:
-        palette = design_data.get("palette", {})
-        mood = design_data.get("mood", "modern")
-        img_prompt = f"Hero background image for a website. {mood}. Color scheme: {palette.get('bg', 'dark')} background with {palette.get('accent', 'bold')} accents. Abstract, textured, cinematic. No text. 16:9 aspect ratio. Professional quality."
+        hero_style = design_data.get("hero_image_style", "")
+        mood = design_data.get("mood", "dark gritty industrial")
+        img_prompt = f"Dark heroic character portrait. {hero_style}. {mood}. High contrast black and white, halftone dot pattern effect, grunge texture overlay. No text, no UI elements. Cinematic lighting from side. 16:9. Professional quality suitable for website hero background."
         hero_image_path = _generate_image(img_prompt)
         steps_log.append(f"3/5: ✓ Hero image generated")
     except Exception as e:
@@ -815,7 +826,7 @@ Return ONLY the CSS. No markdown, no explanations, no HTML."""
     if generate_video:
         steps_log.append("4/5: Generating hero video...")
         try:
-            vid_prompt = f"Slow cinematic pan over abstract {mood} texture. Dark atmosphere, subtle particles, seamless loop feel. No people, no text."
+            vid_prompt = f"Slow cinematic push-in on a dark armored figure. {mood}. Dust particles floating in dramatic side lighting. High contrast black and white. No text, no faces visible clearly. Haunting atmosphere. Seamless loop feel. 6 seconds."
             hero_video_path = _generate_video(vid_prompt)
             steps_log.append("4/5: ✓ Hero video generated")
         except Exception as e:
@@ -865,7 +876,7 @@ Rebuild the entire site as a single HTML page. CRITICAL RULES:
 Return ONLY the complete HTML (no markdown, no explanations). The page MUST look exactly like the design tokens describe."""
 
     try:
-        full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=16000)
+        full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=20000)
         # Strip markdown wrappers
         if full_html.startswith("```"):
             lines = full_html.split("\n")
