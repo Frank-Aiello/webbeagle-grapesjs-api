@@ -898,6 +898,25 @@ def ai_refine_hero():
         except Exception as e:
             return jsonify({"error": f"Vision extraction failed: {e}"}), 500
 
+        # ── Override spec with LOCKED known values ──
+        if known.get("colors") and len(known["colors"]) >= 2:
+            spec["canvas"]["bg_color"] = known["colors"][0]
+            spec["cta_button"]["bg_color"] = known["colors"][1] if len(known["colors"]) > 1 else known["colors"][0]
+            if "badge" in spec:
+                spec["badge"]["right_bg"] = known["colors"][1] if len(known["colors"]) > 1 else known["colors"][0]
+            iterations_log.append({"step": "locked_colors", "status": "ok", "colors": known["colors"]})
+        if known.get("fonts", {}).get("headline"):
+            for word in spec.get("headline", {}).get("words", []):
+                word["font_family"] = known["fonts"]["headline"]
+            iterations_log.append({"step": "locked_fonts", "status": "ok", "headline": known["fonts"]["headline"]})
+        if known.get("brand_name"):
+            if spec.get("headline", {}).get("words"):
+                spec["headline"]["words"][0]["text"] = known["brand_name"]
+                iterations_log.append({"step": "locked_brand", "status": "ok", "name": known["brand_name"]})
+        if known.get("cta_text"):
+            spec["cta_button"]["text"] = known["cta_text"]
+            iterations_log.append({"step": "locked_cta", "status": "ok", "cta": known["cta_text"]})
+
         # Override font_family in spec with detected fonts if available
         if detected_fonts:
             for word in spec.get("headline", {}).get("words", []):
