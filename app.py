@@ -605,7 +605,13 @@ Generate a single self-contained HTML section based on the user's request. If th
         system_msg += f"\n\n## Existing Page Context\nThe following HTML is already on the page. Make sure your section integrates well with it:\n```html\n{context_html[:3000]}\n```"
 
     try:
-        generated = _claude_generate(system_msg, prompt)
+        if vision_url:
+            generated = _claude_generate(system_msg, [
+                {"type": "text", "text": prompt},
+                {"type": "image", "source": {"type": "url", "url": vision_url}}
+            ])
+        else:
+            generated = _claude_generate(system_msg, prompt)
 
         # Strip markdown code blocks if present
         if generated.startswith("```"):
@@ -648,147 +654,56 @@ def ai_redesign():
 
     steps_log = []
 
-    # ── Step 1: Vision Analysis ──
-    vision_prompt = """You are a design analyst extracting EXACT visual specifications from this image to generate a pixel-matched website theme.
+    # ── Step 1: Vision → CSS directly (NO JSON middleman) ──
+    vision_css_prompt = """You are a world-class web designer. Look at this design image and generate COMPLETE, PIXEL-PERFECT theme CSS that recreates it exactly.
 
-Return a JSON object with THESE EXACT KEYS. Be specific — every value must match what you SEE in the image:
+## CRITICAL — Extracted these EXACT elements from the image:
+- The beige/paper strip banner at the very top with small text
+- The massive bold uppercase headline with one word in bright green
+- The dark background with subtle grit/noise texture
+- The email input field with a dark outlined box
+- The bright green CTA button with dark text
+- The character/hero image on the right in a halftone dot pattern style, black and white, high contrast
+- The strikethrough original pricing with green current pricing
+- The two-column layout (text left, image right)
 
-{
-  "mood": "exact 3-5 word aesthetic description",
-  "palette": {
-    "bg": "#hex — the main background color",
-    "text_primary": "#hex — the dominant text color on dark bg",
-    "accent": "#hex — the highlight/accent color (likely green)",
-    "accent_text": "#hex — color of text ON accent backgrounds",
-    "paper": "#hex — the beige/paper strip color at the top",
-    "muted": "#hex — secondary text, placeholder text"
-  },
-  "typography": {
-    "heading_font": "exact font family for bold headlines",
-    "body_font": "exact font family for body text",
-    "hero_headline": {
-      "size": "clamp or px value",
-      "weight": "bold or number",
-      "case": "uppercase",
-      "letter_spacing": "normal/tight/wide",
-      "style": "bold industrial sans-serif, specific describing words"
-    },
-    "subheadline": {
-      "size": "clamp or px value", 
-      "weight": "normal",
-      "case": "lowercase",
-      "style": "smaller refined text under headline"
-    },
-    "badge_text": {
-      "size": "px value",
-      "case": "lowercase",
-      "style": "paper strip badge at top"
-    }
-  },
-  "effects": ["specific list: distressed texture, halftone pattern on images, paper strip banner, grit/noise overlay, etc."],
-  "button": {
-    "bg": "#hex — button background",
-    "text": "#hex — button text color",
-    "border_radius": "px value",
-    "padding": "vertical horizontal in px",
-    "font_weight": "bold/normal",
-    "case": "uppercase"
-  },
-  "input_field": {
-    "bg": "#hex or transparent",
-    "border": "1px solid #hex",
-    "text": "#hex placeholder color",
-    "padding": "px value"
-  },
-  "pricing": {
-    "strikethrough_color": "#hex",
-    "current_color": "#hex accent color",
-    "font_size": "px value for prices"
-  },
-  "layout": {
-    "hero_structure": "two-column: text left, character image right",
-    "alignment": "left-aligned text, etc",
-    "max_width": "max content width in px"
-  },
-  "hero_image_style": "describe the character image treatment: halftone, black and white, gritty, knight helmet, etc.",
-  "generated_css": "DO NOT WRITE CSS YET. Write detailed CSS SPECIFICATION listing every rule needed: font imports, :root variables for all colors, body defaults (bg, color, font), .hero-section layout, .badge for paper strip, .headline with uppercase bold, .accent-word for green highlight words, .email-input with border style, .btn-accent with exact button styling, .pricing-original with strikethrough, .pricing-current with accent color, .hero-image with halftone/dot pattern, .noise-overlay for grit texture, responsive breakpoints."
-}"""
-    steps_log.append("1/5: Analyzing design image...")
+## CSS Requirements:
+1. @import Google Fonts: Bebas Neue (headings), Inter (body)
+2. :root variables for: --bg (#0a0a0a true black), --text (#ffffff), --accent (bright green from image), --paper (beige from badge), --muted (gray for secondary text)
+3. body { background:#0a0a0a; color:#fff; font-family:'Inter',sans-serif; }
+4. .badge { background:beige-paper-color; color:#1a1a1a; display:inline-block; padding:6px 16px; font-size:11px; text-transform:uppercase; letter-spacing:2px; font-weight:600; }
+5. .headline { font-family:'Bebas Neue',sans-serif; font-size:clamp(3.5rem,8vw,7rem); font-weight:400; text-transform:uppercase; letter-spacing:2px; line-height:0.9; }
+6. .accent { color: bright-green-from-image; }
+7. .hero-section { display:grid; grid-template-columns:1fr 1fr; min-height:100vh; align-items:center; gap:60px; padding:120px 80px; }
+8. .email-input { background:transparent; border:1px solid #555; color:#fff; padding:14px 20px; font-size:16px; width:100%; max-width:360px; }
+9. .btn-accent { background: bright-green; color:#0a0a0a; border:none; padding:14px 32px; font-weight:700; text-transform:uppercase; letter-spacing:1px; cursor:pointer; }
+10. .pricing-original { text-decoration:line-through; color:#888; }
+11. .pricing-current { color: bright-green; font-size:1.5rem; font-weight:700; }
+12. .hero-image img { width:100%; filter:grayscale(100%) contrast(1.4); }
+13. .noise-overlay { position:fixed; inset:0; pointer-events:none; opacity:0.04; background: url noise pattern; }
+14. .section { padding:100px 80px; max-width:1400px; margin:0 auto; }
+15. .feature-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:40px; }
+16. .feature-card { border:1px solid rgba(255,255,255,0.06); padding:30px; }
+17. @media(max-width:768px){.hero-section{grid-template-columns:1fr;padding:60px 24px;}.section{padding:60px 24px;}}
+18. @keyframes drift { 0%{transform:translate(0,0)} 100%{transform:translate(1px,1px)} }
+
+Return ONLY the CSS. No markdown, no explanations, no HTML. Every hex color must be EXACTLY what you see in the image."""
     try:
-        vision_response = _claude_generate(vision_prompt, 
-            [{"type": "text", "text": "Analyze this design image."},
-             {"type": "image", "source": {"type": "url", "url": design_image_url}}])
-        # Try to parse JSON from the response
-        json_match = re.search(r'\{.*\}', vision_response, re.DOTALL)
-        design_data = json.loads(json_match.group()) if json_match else {}
+        theme_css = _claude_generate(vision_css_prompt, [
+            {"type": "text", "text": "Generate the CSS for this design."},
+            {"type": "image", "source": {"type": "url", "url": design_image_url}}
+        ], max_tokens=4000)
+        # Strip markdown wrappers
+        if theme_css.startswith("```"):
+            lines = theme_css.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            theme_css = "\n".join(lines)
+        steps_log.append(f"1/5: ✓ Theme CSS generated ({len(theme_css)} chars)")
     except Exception as e:
-        return jsonify({"error": f"Vision analysis failed: {e}", "steps": steps_log}), 500
-
-    theme_css = design_data.get("generated_css", "")
-    steps_log.append("1/5: ✓ Design DNA extracted")
-
-    # ── Step 1.5: Generate Theme CSS from Design Spec ──
-    steps_log.append("1.5/5: Generating theme CSS...")
-    css_spec = design_data.get("generated_css", "")
-    palette = design_data.get("palette", {})
-    typography = design_data.get("typography", {})
-    effects = design_data.get("effects", [])
-    button = design_data.get("button", {})
-    input_field = design_data.get("input_field", {})
-    pricing = design_data.get("pricing", {})
-    layout = design_data.get("layout", {})
-
-    css_prompt = f"""Generate PRODUCTION-READY theme CSS that EXACTLY matches this design specification. This must be 10/10 quality — a site the client cannot refuse.
-
-## Design Tokens
-Palette: {json.dumps(palette)}
-Typography: {json.dumps(typography)}
-Effects: {json.dumps(effects)}
-Button: {json.dumps(button)}
-Input: {json.dumps(input_field)}
-Pricing: {json.dumps(pricing)}
-Layout: {json.dumps(layout)}
-
-## CSS Specification (from vision analysis)
-{css_spec}
-
-## OUTPUT RULES — 10/10 QUALITY REQUIRED
-- @import Google Fonts: Inter (400,500,600 weights for body), Bebas Neue (for headings — it's bold, condensed, industrial)
-- :root variables for ALL palette colors — use EXACT hex values from the spec
-- body: font-family MUST be 'Inter', sans-serif (NEVER Arial or generic fallback alone). background: #0a0a0a (true black, not gray-black). color: var(--text-primary). antialiased.
-- .hero-section: display:grid; grid-template-columns:1fr 1fr; min-height:100vh; align-items:center; gap:60px; padding:120px 80px;
-- .badge: background:var(--paper-beige); color:#1a1a1a; display:inline-block; padding:6px 16px; font-size:12px; text-transform:uppercase; letter-spacing:2px; font-weight:600; border-radius:2px; margin-bottom:24px;
-- .headline: font-family:'Bebas Neue',sans-serif; font-size:clamp(3rem,8vw,6rem); font-weight:400; text-transform:uppercase; letter-spacing:2px; line-height:0.9; color:var(--text-primary);
-- .accent: color:var(--accent-green);
-- .subheadline: font-family:'Inter',sans-serif; font-size:1.05rem; color:var(--text-muted); line-height:1.7; max-width:500px;
-- .email-input: background:transparent; border:1px solid var(--text-muted); color:var(--text-primary); padding:14px 20px; font-size:16px; border-radius:4px; width:100%; max-width:360px;
-- .btn-accent: background:var(--accent-green); color:var(--accent-text); border:none; padding:14px 32px; font-size:14px; font-weight:700; text-transform:uppercase; letter-spacing:1px; border-radius:4px; cursor:pointer; transition:opacity 0.2s;
-- .btn-accent:hover: opacity:0.85;
-- .pricing-original: color:var(--text-muted); text-decoration:line-through; font-size:1rem; margin-right:8px;
-- .pricing-current: color:var(--accent-green); font-size:1.5rem; font-weight:700;
-- .hero-image-wrap: position:relative; overflow:hidden;
-- .hero-image-wrap img: width:100%; filter:grayscale(100%) contrast(1.3); mix-blend-mode:lighten;
-- .section: padding:100px 80px; max-width:1400px; margin:0 auto;
-- .section-dark: background:#050505;
-- .noise-overlay: position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:9999; opacity:0.03; background-image:url('data:image/svg+xml,base64,...'); /* subtle noise */
-- h2: font-family:'Bebas Neue',sans-serif; font-size:clamp(2rem,5vw,3.5rem); text-transform:uppercase; letter-spacing:2px; margin-bottom:40px;
-- h3: font-family:'Inter',sans-serif; font-size:1.1rem; font-weight:600; text-transform:uppercase; letter-spacing:1px; color:var(--accent-green); margin-bottom:12px;
-- p: font-family:'Inter',sans-serif; line-height:1.8; color:var(--text-muted); max-width:600px; margin-bottom:20px;
-- .feature-grid: display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:40px;
-- .feature-card: padding:30px; border:1px solid rgba(255,255,255,0.06); border-radius:8px; background:rgba(255,255,255,0.02);
-- .pricing-table: display:flex; gap:24px; justify-content:center; flex-wrap:wrap;
-- .pricing-card: padding:32px; border:1px solid rgba(255,255,255,0.08); border-radius:8px; min-width:220px; text-align:center;
-- Responsive: @media(max-width:768px) .hero-section grid-template-columns:1fr, padding:60px 24px, .section padding:60px 24px, .headline font-size:clamp(2.5rem,10vw,4rem)
-- Include a subtle CSS animation: @keyframes subtle-drift for background texture movement
-- ALL colors EXACTLY match the palette — no creative interpretation
-
-Return ONLY the CSS. No markdown, no explanations, no HTML."""
-    try:
-        theme_css = _claude_generate(css_prompt, "Generate the theme CSS.", max_tokens=4000)
-        steps_log.append("1.5/5: ✓ Theme CSS generated")
-    except Exception as e:
-        steps_log.append(f"1.5/5: ⚠ CSS gen failed, using spec as fallback")
-        theme_css = css_spec  # fallback to the spec text
+        return jsonify({"error": f"CSS generation failed: {e}", "steps": steps_log}), 500
 
     # ── Step 2: Content Extraction ──
     steps_log.append("2/5: Extracting site content...")
@@ -838,23 +753,15 @@ Return ONLY the CSS. No markdown, no explanations, no HTML."""
     steps_log.append("5/5: Assembling site with new theme...")
     assembly_prompt = f"""You are rebuilding an entire website with a new visual design while preserving all the original CONTENT.
 
-## DESIGN TOKENS (from vision analysis — authoritative)
-- Mood: {json.dumps(design_data.get('mood', ''))}
-- Palette: {json.dumps(palette)}
-- Typography: {json.dumps(typography)}
-- Effects: {json.dumps(effects)}
-- Layout: {json.dumps(layout)}
-- Hero image style: {json.dumps(design_data.get('hero_image_style', ''))}
-
-## THEME CSS (Authoritative — use these exact class names)
+## THEME CSS (Authoritative — use these EXACT class names)
 ```css
 {theme_css}
 ```
 
-## NEW HERO IMAGE
-{hero_image_path or 'No hero image — use CSS background gradient matching the palette.'}
+## HERO IMAGE
+{hero_image_path or 'No hero image — use CSS background gradient matching the theme.'}
 
-## NEW HERO VIDEO
+## HERO VIDEO
 {hero_video_path or 'No video.'}
 
 ## ORIGINAL SITE CONTENT (Preserve ALL text, links, forms, and structure)
@@ -862,18 +769,19 @@ Return ONLY the CSS. No markdown, no explanations, no HTML."""
 {site_content}
 ```
 
-## YOUR TASK
+## YOUR TASK — 10/10 QUALITY
 Rebuild the entire site as a single HTML page. CRITICAL RULES:
-1. Use the THEME CSS classes for EVERY element — .hero-section, .badge, .headline, .accent, .subheadline, .email-input, .btn-accent, .pricing-original, .pricing-current, .hero-image, .noise-overlay, .section
-2. The .headline text should be UPPERCASE with .accent class on the key highlight word (e.g., <span class="accent">CODE</span>)
-3. The .badge class creates the beige paper strip effect — use it for the top tagline
-4. Preserve EVERY section from the original — hero, features, pricing, footer, EVERYTHING
-5. Preserve ALL form elements exactly — method, action, input names, placeholders — the waitlist form must work
-6. Remove or replace broken image URLs (like images/ from old site)
-7. Hero layout: two columns — text left, {hero_image_path and 'hero image right' or 'CSS background right'}
-8. Include the noise overlay for gritty texture
+1. Use THEME CSS classes for EVERY element: .badge, .headline, .accent (for green words), .subheadline, .email-input, .btn-accent, .pricing-original, .pricing-current, .hero-image, .hero-section, .noise-overlay, .section, .feature-grid, .feature-card, .section-dark
+2. .headline text UPPERCASE with .accent on the highlight word
+3. .badge creates beige paper strip effect — use for top tagline
+4. Hero layout: two columns (.hero-section) — text left, hero image right
+5. Include ALL sections from original: hero/waitlist, features (Photo Scan, Full Ingredient Logging, SigmaChef, Exercise Tracking, Rules), Your Plan, Aura Points, Log Anything, pricing CTA, footer
+6. Preserve ALL form elements exactly — the waitlist form MUST work (method, action, inputs)
+7. Remove broken image URLs (images/ paths from old site)
+8. Include noise-overlay div for gritty texture
+9. Every section has proper spacing, every text uses the right font class
 
-Return ONLY the complete HTML (no markdown, no explanations). The page MUST look exactly like the design tokens describe."""
+Return ONLY the complete HTML. No markdown, no explanations. The page MUST be pixel-perfect to the theme CSS."""
 
     try:
         full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=20000)
