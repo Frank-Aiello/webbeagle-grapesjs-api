@@ -687,9 +687,9 @@ Return a JSON object with these keys:
         body_html = body_match.group(1) if body_match else html_content
         body_html = re.sub(r'<script[\s\S]*?</script>', '', body_html, flags=re.IGNORECASE)
         body_html = re.sub(r'<style[\s\S]*?</style>', '', body_html, flags=re.IGNORECASE)
-        # Truncate for AI
-        site_content = body_html[:15000]
-        steps_log.append("2/5: ✓ Content extracted")
+        # Truncate for AI — need enough for all sections
+        body_html = body_html[:30000]
+        steps_log.append("2/5: ✓ Content extracted ({:,} chars)".format(len(body_html)))
     except Exception as e:
         return jsonify({"error": f"Content extraction failed: {e}", "steps": steps_log}), 500
 
@@ -735,24 +735,24 @@ Return a JSON object with these keys:
 
 ## ORIGINAL SITE CONTENT (Preserve ALL text, links, forms, and structure)
 ```html
-{site_content[:8000]}
+{site_content}
 ```
 
 ## YOUR TASK
-Rebuild the entire site as a single HTML page. Rules:
+Rebuild the entire site as a single HTML page. CRITICAL RULES:
 1. Use the NEW THEME CSS classes for ALL styling — do NOT keep any old colors, fonts, or backgrounds
-2. Preserve ALL text content, links, form action URLs, input names, and button text from the original site
-3. If a hero image was generated, use it as the hero background
-4. If a hero video was generated, embed it as a muted autoplay loop in the hero section
-5. Keep ALL sections from the original site — don't remove or combine anything
+2. Preserve EVERY section, EVERY paragraph, EVERY link, EVERY form from the original — DO NOT truncate or omit anything
+3. Include ALL feature sections (AI food analysis, rules engine, SigmaChef, workout tracking, etc.)
+4. Preserve all form elements exactly — method, action, input names, placeholders
+5. If a hero image was generated, use it as the hero background
 6. Add appropriate wb-section classes and data attributes for GrapesJS
-7. Make forms work exactly as they did — preserve method, action, input names
-8. Wrap all sections in a root container
+7. Fix any broken image references — replace old site paths with working ones, or remove broken images
+8. Output the COMPLETE page — nothing omitted
 
 Return ONLY the complete HTML (no markdown, no explanations). The output goes directly into GrapesJS and must render perfectly standalone."""
 
     try:
-        full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=8000)
+        full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=16000)
         # Strip markdown wrappers
         if full_html.startswith("```"):
             lines = full_html.split("\n")
