@@ -13,6 +13,7 @@ import shutil
 import time
 import yaml
 import requests
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -1024,6 +1025,410 @@ If match_score >= 95, set discrepancies to empty array []."""
         "best_score": best_score,
         "iterations": iterations_log
     })
+
+# ══════════════════════════════════════════════════════════════
+#  AI — URL Scraper (Design Token Extraction)
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/api/ai/scrape-url", methods=["POST"])
+def ai_scrape_url():
+    """
+    Extract design tokens from a URL — fonts, colors, layout, button styles.
+
+    Body: {
+        "url": "https://site-to-scrape.com",
+        "detect_fonts": true              // optional — run WhatFontIs
+    }
+
+    Returns: {
+        "dominant_fonts": [...],
+        "color_palette": [...],
+        "layout_pattern": "hero-centered",
+        "hero_structure": {...},
+        "button_style": {...},
+        "spacing_system": "generous",
+        "screenshot_b64": "data:image/png;base64,...",
+        "errors": [...]
+    }
+    """
+    from url_scraper import scrape_url
+
+    data = request.get_json(force=True)
+    url = data.get("url", "").strip()
+
+    if not url:
+        return jsonify({"error": "url is required"}), 400
+
+    wfi_key = data.get("whatfontis_api_key") or os.environ.get("WHATFONTIS_API_KEY", "")
+    if not data.get("detect_fonts", True):
+        wfi_key = ""
+
+    result = scrape_url(url, whatfontis_key=wfi_key)
+
+    return jsonify(result)
+
+
+# ══════════════════════════════════════════════════════════════
+#  AI — Concept Generation (Hero Image Concepts)
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/api/ai/generate-concepts", methods=["POST"])
+def ai_generate_concepts():
+    """
+    Generate 3 hero section concept images via KIE for client selection.
+
+    Body: {
+        "spec": {                           // merged spec from onboard or manual
+            "fonts": {"headline": "Bebas Neue", "body": "Cinzel"},
+            "colors": ["#000", "#22c55e", "#f5f0e8"],
+            "site_type": "landing_page",
+            "industry": "fitness",
+            "brand_name": "SigmaCal"
+        },
+        "style_keywords": ["industrial", "gritty"],  // optional vibe hints
+        "count": 3                          // optional, default 3
+    }
+
+    Returns: {
+        "concepts": [
+            {
+                "id": "concept-1",
+                "image_url": "https://...",
+                "prompt": "...",
+                "layout_hint": "hero-centered dark industrial with knight motif"
+            }, ...
+        ],
+        "task_ids": [str, ...]              // KIE task IDs for polling
+    }
+    """
+    data = request.get_json(force=True)
+    spec = data.get("spec", {})
+    style_keywords = data.get("style_keywords", [])
+    count = min(data.get("count", 3), 5)
+
+    if not spec:
+        return jsonify({"error": "spec is required — provide at minimum colors and site_type"}), 400
+
+    fonts = spec.get("fonts", {})
+    colors = spec.get("colors", [])
+    site_type = spec.get("site_type", "landing_page")
+    brand_name = spec.get("brand_name", "")
+    industry = spec.get("industry", "")
+
+    # ── Build 3 distinct concept prompts ──
+    concepts = [
+        {
+            "id": "concept-1",
+            "style": "dark_gritty",
+            "layout_hint": "bold centered hero with dramatic lighting",
+            "prompt": _build_concept_prompt("dark_gritty", spec, style_keywords, brand_name, industry)
+        },
+        {
+            "id": "concept-2",
+            "style": "clean_modern",
+            "layout_hint": "minimal hero with accent color pops and generous whitespace",
+            "prompt": _build_concept_prompt("clean_modern", spec, style_keywords, brand_name, industry)
+        },
+        {
+            "id": "concept-3",
+            "style": "editorial",
+            "layout_hint": "magazine-style hero with asymmetric layout and bold typography",
+            "prompt": _build_concept_prompt("editorial", spec, style_keywords, brand_name, industry)
+        }
+    ]
+
+    # Submit to KIE
+    task_ids = []
+    for concept in concepts[:count]:
+        try:
+            task_id = _kie_submit("grok-imagine/text-to-image", {
+                "prompt": concept["prompt"],
+                "aspect_ratio": "16:9"
+            })
+            concept["task_id"] = task_id
+            task_ids.append(task_id)
+        except Exception as e:
+            concept["error"] = str(e)
+
+    return jsonify({
+        "concepts": concepts[:count],
+        "task_ids": task_ids
+    })
+
+
+def _build_concept_prompt(style: str, spec: dict, keywords: list, brand_name: str, industry: str) -> str:
+    """Build a KIE image prompt for a hero section concept."""
+    colors = spec.get("colors", [])
+    color_str = ", ".join(colors[:3]) if colors else "dark with accent green"
+
+    style_prompts = {
+        "dark_gritty": f"dark moody hero section, {color_str} color scheme, dramatic lighting, gritty texture, bold typography area, cinematic composition, 16:9, professional web design",
+        "clean_modern": f"clean modern hero section, {color_str} color scheme, minimal design, generous whitespace, subtle shadows, professional UI, 16:9, sleek web design",
+        "editorial": f"editorial magazine hero section, {color_str} color scheme, asymmetric layout, bold serif typography, high contrast, artistic composition, 16:9, premium web design"
+    }
+
+    prompt = style_prompts.get(style, style_prompts["dark_gritty"])
+
+    if brand_name:
+        prompt = f"{brand_name} website hero — {prompt}"
+    if industry:
+        prompt = f"{industry} brand — {prompt}"
+    if keywords:
+        prompt = f"{prompt}, {' '.join(keywords)}"
+
+    return prompt
+
+
+# ══════════════════════════════════════════════════════════════
+#  AI — Project Onboarding (Full Pipeline)
+# ══════════════════════════════════════════════════════════════
+
+SPECS_DIR = Path("/opt/data/grapesjs-specs")
+SPECS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.route("/api/ai/project-onboard", methods=["POST"])
+def ai_project_onboard():
+    """
+    Full onboarding pipeline: ingest known + scrape URLs + detect fonts + merge + generate.
+
+    Body: {
+        "project_name": "sigmacal",
+        "known": {
+            "fonts": {"headline": "Bebas Neue", "body": "Cinzel"},
+            "colors": ["#000000", "#22c55e", "#f5f0e8"],
+            "logo_url": "https://...",
+            "seed_html": "<style>...</style><section>...</section>",
+            "site_type": "landing_page",
+            "pages": ["home", "pricing"],
+            "brand_name": "SigmaCal",
+            "industry": "fitness tracking",
+            "voice": "gritty, motivational"
+        },
+        "scrape_urls": ["https://existing-site.com", "https://competitor.com"],
+        "screenshots": ["https://pub.img.url/design1.png", ...],
+        "generate_concepts": false,
+        "build_immediately": true
+    }
+
+    Returns: {
+        "project_id": "sigmacal",
+        "spec": {...},                      // merged design spec
+        "warnings": [...],
+        "gaps": [...],
+        "confidence": {"fonts": "high", "colors": "medium", "layout": "high"},
+        "preview_url": "https://..."       // if build_immediately
+    }
+    """
+    from url_scraper import scrape_url
+    from spec_merger import merge_spec, validate_spec
+
+    data = request.get_json(force=True)
+    project_name = data.get("project_name", f"onboard-{uuid.uuid4().hex[:8]}")
+    known = data.get("known", {})
+    scrape_urls = data.get("scrape_urls", [])
+    screenshots = data.get("screenshots", [])
+    generate_concepts = data.get("generate_concepts", False)
+    build_immediately = data.get("build_immediately", True)
+
+    wfi_key = data.get("whatfontis_api_key") or os.environ.get("WHATFONTIS_API_KEY", "")
+
+    # ── Step 1: Scrape URLs ──
+    scraped_tokens = {}
+    scraped = []
+    for url in scrape_urls:
+        try:
+            tokens = scrape_url(url, whatfontis_key=wfi_key)
+            scraped.append({"url": url, "tokens": tokens})
+        except Exception as e:
+            scraped.append({"url": url, "error": str(e)})
+
+    # Merge scraped results (last URL wins on conflicts, but we track all)
+    all_scraped_fonts = []
+    all_scraped_colors = []
+    all_scraped_layouts = []
+    for s in scraped:
+        t = s.get("tokens", {})
+        all_scraped_fonts.extend(t.get("dominant_fonts", []))
+        all_scraped_colors.extend(t.get("color_palette", []))
+        if t.get("layout_pattern"):
+            all_scraped_layouts.append(t["layout_pattern"])
+
+    detected = {
+        "dominant_fonts": list(dict.fromkeys(all_scraped_fonts))[:5],  # dedupe preserve order
+        "color_palette": list(dict.fromkeys(all_scraped_colors))[:8],
+        "layout_pattern": all_scraped_layouts[0] if all_scraped_layouts else "unknown",
+        "hero_structure": scraped[0]["tokens"].get("hero_structure", {}) if scraped else {},
+        "button_style": scraped[0]["tokens"].get("button_style", {}) if scraped else {},
+        "spacing_system": scraped[0]["tokens"].get("spacing_system", "unknown") if scraped else "unknown"
+    }
+
+    # ── Step 2: Run WhatFontIs on screenshots if provided ──
+    if screenshots and wfi_key:
+        import requests as req_lib
+        screenshot_fonts = []
+        for img_url in screenshots[:3]:
+            try:
+                wfi_resp = req_lib.post("https://www.whatfontis.com/api2/", data={
+                    "API_KEY": wfi_key,
+                    "IMAGEBASE64": "0",
+                    "urlimage": img_url,
+                    "FREEFONTS": "1",
+                    "limit": "10",
+                    "NOTTEXTBOXSDETECTION": "0"
+                }, timeout=30)
+                if wfi_resp.status_code == 200:
+                    fonts = wfi_resp.json()
+                    if isinstance(fonts, list):
+                        for f in fonts[:5]:
+                            screenshot_fonts.append(f["title"])
+            except Exception:
+                pass
+        if screenshot_fonts:
+            # Screenshot fonts take priority over scraped
+            detected["dominant_fonts"] = list(dict.fromkeys(screenshot_fonts + detected.get("dominant_fonts", [])))[:5]
+
+    # ── Step 3: Merge known + detected ──
+    merged = merge_spec(known, detected)
+    spec = merged["spec"]
+
+    # Remove internal keys from spec before saving/returning
+    spec.pop("_font_sources", None)
+    spec.pop("_sources", None)
+
+    # ── Step 4: Save spec ──
+    spec_path = SPECS_DIR / f"{project_name}.json"
+    spec_doc = {
+        "project_name": project_name,
+        "spec": spec,
+        "known": known,
+        "detected": detected,
+        "scraped": scraped,
+        "warnings": merged["warnings"],
+        "gaps": merged["gaps"],
+        "confidence": merged["confidence"],
+        "created": datetime.utcnow().isoformat(),
+        "updated": datetime.utcnow().isoformat()
+    }
+    spec_path.write_text(json.dumps(spec_doc, indent=2))
+
+    response = {
+        "project_id": project_name,
+        "spec": spec,
+        "warnings": merged["warnings"],
+        "gaps": merged["gaps"],
+        "confidence": merged["confidence"],
+        "scraped_urls": len(scraped),
+        "spec_url": f"/api/ai/spec/{project_name}"
+    }
+
+    # ── Step 5: Optionally generate concepts ──
+    if generate_concepts:
+        try:
+            concept_task_ids = []
+            for i, concept_style in enumerate(["dark_gritty", "clean_modern", "editorial"]):
+                prompt = _build_concept_prompt(concept_style, spec, known.get("style_keywords", []),
+                                               known.get("brand_name", ""), known.get("industry", ""))
+                tid = _kie_submit("grok-imagine/text-to-image", {"prompt": prompt, "aspect_ratio": "16:9"})
+                concept_task_ids.append({"style": concept_style, "task_id": tid})
+            response["concept_task_ids"] = concept_task_ids
+        except Exception as e:
+            response["concept_error"] = str(e)
+
+    # ── Step 6: Optionally build immediately ──
+    if build_immediately and spec.get("seed_html"):
+        try:
+            project_id = project_name
+            page_id = "home"
+            seed = spec["seed_html"]
+
+            # Deploy seed HTML as project
+            project_dir = PROJECTS_DIR / project_id
+            project_dir.mkdir(parents=True, exist_ok=True)
+            (project_dir / "pages").mkdir(exist_ok=True)
+            (project_dir / f"pages/{page_id}.html").write_text(seed)
+            _save_meta(project_id, {
+                "name": project_name,
+                "pages": [page_id],
+                "created": datetime.utcnow().isoformat()
+            })
+            response["preview_url"] = f"https://{project_id}.preview.webbeagle.com/{page_id}/"
+        except Exception as e:
+            response["build_error"] = str(e)
+
+    return jsonify(response)
+
+
+# ══════════════════════════════════════════════════════════════
+#  AI — Spec Management (Read / Update)
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/api/ai/spec/<project_id>", methods=["GET"])
+def ai_get_spec(project_id):
+    """Read the current merged spec for a project."""
+    spec_path = SPECS_DIR / f"{project_id}.json"
+    if not spec_path.exists():
+        return jsonify({"error": "Spec not found"}), 404
+    return jsonify(json.loads(spec_path.read_text()))
+
+
+@app.route("/api/ai/spec/<project_id>", methods=["PATCH"])
+def ai_update_spec(project_id):
+    """
+    Update known values and re-merge the spec.
+
+    Body: {
+        "known": {
+            "fonts": {"body": "Inter"},
+            "colors": ["#000", "#fff", "#ff0000"],
+            "cta_text": "GET STARTED"
+        }
+    }
+
+    Returns the re-merged spec.
+    """
+    from spec_merger import merge_spec
+
+    spec_path = SPECS_DIR / f"{project_id}.json"
+    if not spec_path.exists():
+        return jsonify({"error": "Spec not found. Run project-onboard first."}), 404
+
+    doc = json.loads(spec_path.read_text())
+    data = request.get_json(force=True)
+
+    new_known = data.get("known", {})
+    # Merge with existing known (incoming overrides)
+    existing_known = doc.get("known", {})
+    existing_known = _deep_merge(existing_known, new_known)
+
+    # Re-merge
+    merged = merge_spec(existing_known, doc.get("detected", {}))
+    spec = merged["spec"]
+    spec.pop("_font_sources", None)
+    spec.pop("_sources", None)
+
+    # Save
+    doc["known"] = existing_known
+    doc["spec"] = spec
+    doc["warnings"] = merged["warnings"]
+    doc["gaps"] = merged["gaps"]
+    doc["confidence"] = merged["confidence"]
+    doc["updated"] = datetime.utcnow().isoformat()
+    spec_path.write_text(json.dumps(doc, indent=2))
+
+    return jsonify(doc)
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base. Override wins on conflicts."""
+    result = deepcopy(base)
+    for key, val in override.items():
+        if isinstance(val, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
 
 # ══════════════════════════════════════════════════════════════
 #  AI — Full Site Redesign (Legacy — use perfect-hero instead)
