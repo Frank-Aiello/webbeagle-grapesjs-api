@@ -900,9 +900,11 @@ def ai_refine_hero():
 
         # ── Override spec with LOCKED known values ──
         if known.get("colors") and len(known["colors"]) >= 2:
+            if "canvas" not in spec: spec["canvas"] = {}
             spec["canvas"]["bg_color"] = known["colors"][0]
+            if "cta_button" not in spec: spec["cta_button"] = {}
             spec["cta_button"]["bg_color"] = known["colors"][1] if len(known["colors"]) > 1 else known["colors"][0]
-            if "badge" in spec:
+            if "badge" in spec and spec["badge"]:
                 spec["badge"]["right_bg"] = known["colors"][1] if len(known["colors"]) > 1 else known["colors"][0]
             iterations_log.append({"step": "locked_colors", "status": "ok", "colors": known["colors"]})
         if known.get("fonts", {}).get("headline"):
@@ -910,10 +912,12 @@ def ai_refine_hero():
                 word["font_family"] = known["fonts"]["headline"]
             iterations_log.append({"step": "locked_fonts", "status": "ok", "headline": known["fonts"]["headline"]})
         if known.get("brand_name"):
-            if spec.get("headline", {}).get("words"):
-                spec["headline"]["words"][0]["text"] = known["brand_name"]
+            words = spec.get("headline", {}).get("words", [])
+            if words:
+                words[0]["text"] = known["brand_name"]
                 iterations_log.append({"step": "locked_brand", "status": "ok", "name": known["brand_name"]})
         if known.get("cta_text"):
+            if "cta_button" not in spec: spec["cta_button"] = {}
             spec["cta_button"]["text"] = known["cta_text"]
             iterations_log.append({"step": "locked_cta", "status": "ok", "cta": known["cta_text"]})
 
