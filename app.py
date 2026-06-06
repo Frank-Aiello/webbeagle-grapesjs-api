@@ -118,6 +118,25 @@ def _kie_poll(taskId: str, model: str, timeout: int = 300) -> dict:
         time.sleep(3)
     raise Exception(f"KIE task {taskId} timed out after {timeout}s")
 
+
+@app.route("/api/kie/record/<taskId>", methods=["GET"])
+def kie_record(taskId):
+    """Public endpoint to poll a KIE task status."""
+    try:
+        import requests as req_lib
+        query_url = f"{KIE_BASE}/jobs/recordInfo?taskId={taskId}"
+        r = req_lib.get(query_url, headers={"Authorization": f"Bearer {KIE_API_KEY}"}, timeout=10)
+        data = r.json()
+        task_data = data.get("data", {})
+        return jsonify({
+            "state": task_data.get("state", ""),
+            "resultJson": task_data.get("resultJson", "{}"),
+            "failMsg": task_data.get("failMsg", "")
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "state": "error"}), 500
+
+
 def _download_asset(url: str, filename: str) -> str:
     """Download to assets dir, return public URL path /assets/<filename>."""
     r = requests.get(url, timeout=60)
@@ -295,6 +314,37 @@ def standalone_preview():
 @app.route("/assets/<path:filename>")
 def serve_asset(filename):
     return send_from_directory(str(ASSETS_DIR), filename)
+
+
+@app.route("/api/assets/upload", methods=["POST"])
+def upload_asset():
+    """Upload an image file. Returns the public URL."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    f = request.files["file"]
+    if f.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+
+    ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else "png"
+    allowed = {"png", "jpg", "jpeg", "webp", "gif", "svg"}
+    if ext not in allowed:
+        return jsonify({"error": f"Unsupported file type: {ext}"}), 400
+
+    name = f"{uuid.uuid4().hex}.{ext}"
+    f.save(str(ASSETS_DIR / name))
+
+    host = request.host
+    forwarded = request.headers.get("X-Forwarded-Host", "")
+    if forwarded:
+        host = forwarded
+
+    return jsonify({
+        "url": f"https://{host}/assets/{name}",
+        "filename": name,
+        "size": os.path.getsize(str(ASSETS_DIR / name))
+    }), 201
+
 
 # ══════════════════════════════════════════════════════════════
 #  API — Health
