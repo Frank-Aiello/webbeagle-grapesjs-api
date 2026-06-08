@@ -239,6 +239,83 @@ def _save_meta(project_id, meta):
 def _sanitize_slug(s):
     return re.sub(r"[^a-z0-9-]", "", s.lower().replace(" ", "-"))[:40]
 
+# ── GrapesJS JSON → HTML converter ─────────────────────────────
+VOID_ELEMENTS = {"br", "hr", "img", "input", "meta", "link", "source", "area",
+                 "base", "col", "embed", "track", "wbr"}
+
+def _gjs_to_html(node):
+    """Convert a GrapesJS JSON component tree node to HTML string.
+    Handles arrays (siblings), objects (elements/text), and raw strings.
+    """
+    if isinstance(node, list):
+        return "".join(_gjs_to_html(n) for n in node)
+    if isinstance(node, str):
+        return node
+    if not isinstance(node, dict):
+        return str(node)
+
+    tag = node.get("tagName", "div")
+    node_type = node.get("type", "")
+
+    # Textnode: just return content
+    if node_type == "textnode":
+        return node.get("content", "")
+
+    # Type-based tag fallback
+    if not node.get("tagName"):
+        if node_type == "link":
+            tag = "a"
+        elif node_type == "image":
+            tag = "img"
+        elif node_type == "text":
+            tag = "span"
+        elif node_type == "video":
+            tag = "video"
+        elif node_type == "map":
+            tag = "iframe"
+
+    # Build attributes
+    attrs = {}
+    # Inline styles from the style object
+    if "style" in node and isinstance(node["style"], dict):
+        style_parts = []
+        for k, v in node["style"].items():
+            css_key = k.replace("_", "-")
+            style_parts.append(f"{css_key}:{v}")
+        if style_parts:
+            attrs["style"] = ";".join(style_parts)
+    # Explicit attributes
+    if "attributes" in node and isinstance(node["attributes"], dict):
+        for k, v in node["attributes"].items():
+            # style in attributes overrides the style object
+            attrs[k] = str(v)
+    # Classes
+    if "classes" in node and isinstance(node["classes"], list) and node["classes"]:
+        attrs["class"] = " ".join(node["classes"])
+
+    attr_str = ""
+    if attrs:
+        parts = []
+        for k, v in attrs.items():
+            if v:
+                parts.append(f'{k}="{v}"')
+        if parts:
+            attr_str = " " + " ".join(parts)
+
+    # Void elements
+    if tag.lower() in VOID_ELEMENTS:
+        return f"<{tag}{attr_str}>"
+
+    # Children
+    children_html = ""
+    if "components" in node:
+        children_html = _gjs_to_html(node["components"])
+    elif "content" in node:
+        children_html = node["content"]
+
+    return f"<{tag}{attr_str}>{children_html}</{tag}>"
+
+
 def _render_preview(project_id, page_id):
     """Build a standalone HTML page from saved project data."""
     meta = _load_meta(project_id)
@@ -248,7 +325,12 @@ def _render_preview(project_id, page_id):
     if not page_file.exists():
         return None
     page_data = json.loads(page_file.read_text())
-    components_html = page_data.get("components", "")
+    raw_components = page_data.get("components", "")
+    # Handle both JSON objects (GrapesJS component tree) and HTML strings
+    if isinstance(raw_components, (list, dict)):
+        components_html = _gjs_to_html(raw_components)
+    else:
+        components_html = str(raw_components)
     styles_css = page_data.get("styles", "")
     css_raw = meta.get("theme_css", "")
     return f"""<!DOCTYPE html>
@@ -449,16 +531,12 @@ def save_project(project_id):
         meta["pages"] = list(data["pages_data"].keys())
     elif "components" in data or "styles" in data:
         page_id = data.get("page_id", "home")
-        existing = {}
         pp = _page_path(project_id, page_id)
-        if pp.exists():
-            existing = json.loads(pp.read_text())
-        existing.update({
-            "components": data.get("components", existing.get("components", "")),
-            "styles": data.get("styles", existing.get("styles", "")),
-        })
         pp.parent.mkdir(parents=True, exist_ok=True)
-        pp.write_text(json.dumps(existing, indent=2))
+        pp.write_text(json.dumps({
+            "components": data.get("components", ""),
+            "styles": data.get("styles", ""),
+        }, indent=2))
         if page_id not in meta.get("pages", []):
             meta.setdefault("pages", []).append(page_id)
     _save_meta(project_id, meta)
@@ -1737,45 +1815,118 @@ Return ONLY the complete HTML. No markdown, no explanations. The page MUST be pi
     })
 
 # ══════════════════════════════════════════════════════════════
-#  Component Library
+#  Component Library Registry (Enhanced — Categories + Traits)
 # ══════════════════════════════════════════════════════════════
 
 @app.route("/api/components", methods=["GET"])
 def list_components():
+    """List components. Query: ?category=buttons (optional)"""
+    category = request.args.get("category", "")
     components = []
-    for f in sorted(COMPONENTS_DIR.glob("*.json")):
+    
+    if category:
+        cat_dir = COMPONENTS_DIR / category
+        pattern = cat_dir.glob("*.json") if cat_dir.exists() else []
+    else:
+        cat_dirs = [d for d in COMPONENTS_DIR.iterdir() if d.is_dir()]
+        pattern = []
+        for d in cat_dirs:
+            pattern.extend(d.glob("*.json"))
+    
+    for f in sorted(pattern):
         data = json.loads(f.read_text())
         data["id"] = f.stem
+        data["category"] = f.parent.name if f.parent != COMPONENTS_DIR else ""
         components.append(data)
+    
     return jsonify({"components": components})
+
+@app.route("/api/components/categories", methods=["GET"])
+def list_categories():
+    cats = []
+    for d in sorted(COMPONENTS_DIR.iterdir()):
+        if d.is_dir():
+            count = len(list(d.glob("*.json")))
+            cats.append({"name": d.name, "count": count})
+    return jsonify({"categories": cats})
 
 @app.route("/api/components", methods=["POST"])
 def save_component():
+    """Save component. Body: {name, category, html, css, traits, tags, thumbnail}"""
     data = request.get_json() or {}
     name = data.get("name", "Untitled")
+    category = data.get("category", "sections")
     html = data.get("html", "")
+    css = data.get("css", "")
+    traits = data.get("traits", [])
+    tags = data.get("tags", [])
     thumbnail = data.get("thumbnail", "")
-    slug = re.sub(r"[^a-z0-9-]", "", name.lower().replace(" ", "-"))[:30]
+    icon = data.get("icon", "")
+    
+    slug = re.sub(r"[^a-z0-9-]", "", name.lower().replace(" ", "-"))[:40]
     counter = 1
     base = slug or "component"
-    while (COMPONENTS_DIR / f"{slug}.json").exists():
+    
+    cat_dir = COMPONENTS_DIR / category
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    
+    while (cat_dir / f"{slug}.json").exists():
         slug = f"{base}-{counter}"
         counter += 1
+    
     comp = {
-        "name": name,
-        "html": html,
-        "thumbnail": thumbnail,
-        "created": datetime.utcnow().isoformat()
+        "name": name, "category": category, "html": html, "css": css,
+        "traits": traits, "tags": tags, "thumbnail": thumbnail, "icon": icon,
+        "created": datetime.utcnow().isoformat(),
+        "updated": datetime.utcnow().isoformat()
     }
-    (COMPONENTS_DIR / f"{slug}.json").write_text(json.dumps(comp, indent=2))
-    return jsonify({"id": slug, "name": name}), 201
+    
+    (cat_dir / f"{slug}.json").write_text(json.dumps(comp, indent=2))
+    return jsonify({"id": slug, "name": name, "category": category}), 201
+
+@app.route("/api/components/<comp_id>", methods=["GET"])
+def get_component(comp_id):
+    for d in COMPONENTS_DIR.iterdir():
+        if d.is_dir():
+            path = d / f"{comp_id}.json"
+            if path.exists():
+                data = json.loads(path.read_text())
+                data["id"] = comp_id
+                data["category"] = d.name
+                return jsonify(data)
+    return jsonify({"error": "Not found"}), 404
+
+@app.route("/api/components/<comp_id>", methods=["PUT"])
+def update_component(comp_id):
+    data = request.get_json() or {}
+    for d in COMPONENTS_DIR.iterdir():
+        if d.is_dir():
+            path = d / f"{comp_id}.json"
+            if path.exists():
+                comp = json.loads(path.read_text())
+                for key in ["name", "html", "css", "traits", "tags", "thumbnail", "icon"]:
+                    if key in data:
+                        comp[key] = data[key]
+                if "category" in data and data["category"] != d.name:
+                    new_dir = COMPONENTS_DIR / data["category"]
+                    new_dir.mkdir(parents=True, exist_ok=True)
+                    new_path = new_dir / f"{comp_id}.json"
+                    new_path.write_text(json.dumps(comp, indent=2))
+                    path.unlink()
+                    return jsonify({"status": "updated", "id": comp_id, "category": data["category"]})
+                comp["updated"] = datetime.utcnow().isoformat()
+                path.write_text(json.dumps(comp, indent=2))
+                return jsonify({"status": "updated", "id": comp_id})
+    return jsonify({"error": "Not found"}), 404
 
 @app.route("/api/components/<comp_id>", methods=["DELETE"])
 def delete_component(comp_id):
-    path = COMPONENTS_DIR / f"{comp_id}.json"
-    if path.exists():
-        path.unlink()
-        return jsonify({"status": "deleted"})
+    for d in COMPONENTS_DIR.iterdir():
+        if d.is_dir():
+            path = d / f"{comp_id}.json"
+            if path.exists():
+                path.unlink()
+                return jsonify({"status": "deleted"})
     return jsonify({"error": "Not found"}), 404
 
 # ── Run ──────────────────────────────────────────────────────
