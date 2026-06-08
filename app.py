@@ -343,24 +343,127 @@ def _render_preview(project_id, page_id):
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
   <style>{css_raw}</style>
   <style>{styles_css}</style>
+  <style>
+/* ── WebBeagle Animation System v2 (published runtime) ── */
+@keyframes wb-fade-up {{
+  0%   {{ opacity: var(--wb-anim-opacity-start, 0); transform: translateY(var(--wb-anim-offset, 40px)); }}
+  100% {{ opacity: 1; transform: translateY(0); }}
+}}
+@keyframes wb-fade-in {{
+  0%   {{ opacity: var(--wb-anim-opacity-start, 0); }}
+  100% {{ opacity: 1; }}
+}}
+@keyframes wb-slide-left {{
+  0%   {{ opacity: var(--wb-anim-opacity-start, 0); transform: translateX(calc(-1 * var(--wb-anim-offset, 40px))); }}
+  100% {{ opacity: 1; transform: translateX(0); }}
+}}
+@keyframes wb-slide-right {{
+  0%   {{ opacity: var(--wb-anim-opacity-start, 0); transform: translateX(var(--wb-anim-offset, 40px)); }}
+  100% {{ opacity: 1; transform: translateX(0); }}
+}}
+@keyframes wb-zoom-in {{
+  0%   {{ opacity: var(--wb-anim-opacity-start, 0); transform: scale(var(--wb-anim-scale-start, 0.92)); }}
+  100% {{ opacity: 1; transform: scale(1); }}
+}}
+.wb-animated {{
+  animation-fill-mode: both;
+  animation-timing-function: var(--wb-anim-easing, cubic-bezier(0.16, 1, 0.3, 1));
+  animation-duration: var(--wb-anim-duration, 800ms);
+  animation-delay: var(--wb-anim-delay, 0ms);
+  animation-play-state: paused;
+  will-change: opacity, transform;
+}}
+.wb-animated[data-animate="fade-up"]     {{ animation-name: wb-fade-up; }}
+.wb-animated[data-animate="fade-in"]     {{ animation-name: wb-fade-in; }}
+.wb-animated[data-animate="slide-left"]  {{ animation-name: wb-slide-left; }}
+.wb-animated[data-animate="slide-right"] {{ animation-name: wb-slide-right; }}
+.wb-animated[data-animate="zoom-in"]     {{ animation-name: wb-zoom-in; }}
+[data-trigger="load"] .wb-animated,
+.wb-animated[style*="running"] {{ animation-play-state: running; }}
+  </style>
 </head>
 <body>
 {components_html}
 <script>
-(function(){{
-  var observer = new IntersectionObserver(function(entries) {{
-    entries.forEach(function(entry) {{
-      if (entry.isIntersecting) entry.target.classList.add('visible');
+(function() {{
+  'use strict';
+  var scrollObserver = null;
+
+  function processContainers() {{
+    var containers = document.querySelectorAll('[data-animate]');
+    containers.forEach(function(section) {{
+      if (section._wbAnimated) return;
+      var animType = section.getAttribute('data-animate');
+      var stagger  = parseInt(section.getAttribute('data-stagger')) || 120;
+      var duration = parseInt(section.getAttribute('data-duration')) || 800;
+      var easing   = section.getAttribute('data-easing') || 'cubic-bezier(0.16,1,0.3,1)';
+      var startOp  = section.getAttribute('data-initial-opacity') || '0';
+      var trigger  = section.getAttribute('data-trigger') || 'scroll';
+      var offset   = section.getAttribute('data-offset') || '40';
+      var items = section.querySelectorAll('[data-animate-item]');
+      if (items.length === 0) {{
+        var grid = section.querySelector('.testimonials-grid, .services-grid, .steps-grid, [class*="-grid"]');
+        if (grid) items = grid.children;
+      }}
+      if (items.length === 0) {{
+        items = [];
+        Array.from(section.children).forEach(function(c) {{
+          if (c.nodeType === 1 && !c.classList.contains('section-header')) items.push(c);
+        }});
+      }}
+      if (items.length === 0) {{ items = [section]; }}
+      Array.from(items).forEach(function(item, i) {{
+        if (item._wbAnimated) return;
+        item.classList.add('wb-animated');
+        item.setAttribute('data-animate', animType);
+        item.style.setProperty('--wb-anim-delay', (i * stagger) + 'ms');
+        item.style.setProperty('--wb-anim-duration', duration + 'ms');
+        item.style.setProperty('--wb-anim-easing', easing);
+        item.style.setProperty('--wb-anim-opacity-start', startOp);
+        item.style.setProperty('--wb-anim-offset', offset + 'px');
+        item._wbAnimated = true;
+      }});
+      section._wbAnimated = true;
+      if (trigger === 'load') {{
+        Array.from(items).forEach(function(item) {{ item.style.animationPlayState = 'running'; }});
+      }}
     }});
-  }}, {{ threshold: 0.15 }});
-  document.querySelectorAll('.reveal').forEach(function(el) {{ observer.observe(el); }});
-  document.querySelectorAll('.glass').forEach(function(card) {{
-    card.addEventListener('mousemove', function(e) {{
-      var rect = card.getBoundingClientRect();
-      card.style.setProperty('--mx', ((e.clientX - rect.left) / rect.width) * 100 + '%');
-      card.style.setProperty('--my', ((e.clientY - rect.top) / rect.height) * 100 + '%');
+    setupScrollObserver();
+  }}
+
+  function setupScrollObserver() {{
+    if (!window.IntersectionObserver) return;
+    if (scrollObserver) {{ try {{ scrollObserver.disconnect(); }} catch(e) {{}} }}
+    var els = document.querySelectorAll('.wb-animated[data-animate]');
+    var targets = [];
+    els.forEach(function(el) {{
+      if (el.style.animationPlayState === 'running') return;
+      var s = el.closest('[data-trigger]');
+      if (s && s.getAttribute('data-trigger') === 'load') return;
+      targets.push(el);
     }});
-  }});
+    if (targets.length === 0) return;
+    scrollObserver = new IntersectionObserver(function(entries) {{
+      entries.forEach(function(entry) {{
+        if (entry.isIntersecting) {{ entry.target.style.animationPlayState = 'running'; scrollObserver.unobserve(entry.target); }}
+      }});
+    }}, {{ threshold: 0.1 }});
+    targets.forEach(function(el) {{ scrollObserver.observe(el); }});
+  }}
+
+  // Legacy .reveal support
+  (function() {{
+    var reveals = document.querySelectorAll('.reveal:not(.visible)');
+    if (reveals.length === 0) return;
+    var obs = new IntersectionObserver(function(entries) {{
+      entries.forEach(function(entry) {{
+        if (entry.isIntersecting) {{ entry.target.classList.add('visible'); obs.unobserve(entry.target); }}
+      }});
+    }}, {{ threshold: 0.15 }});
+    reveals.forEach(function(el) {{ obs.observe(el); }});
+  }})();
+
+  // Hero scroll parallax
   var hero = document.querySelector('.hero');
   var heroWrap = document.querySelector('.hero-wrap');
   if (heroWrap && hero) {{
@@ -370,12 +473,25 @@ def _render_preview(project_id, page_id):
       hero.style.opacity = 0.4 + (progress * 0.6);
     }}, {{ passive: true }});
   }}
+
+  // Smooth anchor links
   document.querySelectorAll('a[href^="#"]').forEach(function(link) {{
     link.addEventListener('click', function(e) {{
       var target = document.querySelector(this.getAttribute('href'));
       if (target) {{ e.preventDefault(); target.scrollIntoView({{ behavior: 'smooth' }}); }}
     }});
   }});
+
+  // Glass card hover
+  document.querySelectorAll('.glass').forEach(function(card) {{
+    card.addEventListener('mousemove', function(e) {{
+      var rect = card.getBoundingClientRect();
+      card.style.setProperty('--mx', ((e.clientX - rect.left) / rect.width) * 100 + '%');
+      card.style.setProperty('--my', ((e.clientY - rect.top) / rect.height) * 100 + '%');
+    }});
+  }});
+
+  processContainers();
 }})();
 </script>
 </body>
