@@ -541,8 +541,9 @@ def _render_preview(project_id, page_id):
       var fd = new FormData(form);
       var data = {{}};
       fd.forEach(function(v, k) {{ if (k !== '_wb_hp') data[k] = v; }});
+      data['_project'] = '{project_id}';
 
-      fetch('/api/submit-form', {{
+      fetch('https://builder.webbeagle.com/api/submit-form', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify(data)
@@ -782,26 +783,28 @@ def update_project_settings(project_id):
 
 @app.route("/api/submit-form", methods=["POST"])
 def submit_form():
-    # Resolve project from Host header
+    data = request.get_json() or {}
+
+    # Resolve project: try Host header first, then _project field
     host = request.headers.get("Host", "")
-    slug = None
-    if ".preview.webbeagle.com" in host:
-        slug = host.split(".")[0]
-    else:
-        for d in PROJECTS_DIR.iterdir():
-            if d.is_dir():
-                m = _load_meta(d.name)
-                if m and m.get("live_domain") == host:
-                    slug = d.name
-                    break
+    slug = data.pop("_project", None)
+
+    if not slug:
+        if ".preview.webbeagle.com" in host:
+            slug = host.split(".")[0]
+        else:
+            for d in PROJECTS_DIR.iterdir():
+                if d.is_dir():
+                    m = _load_meta(d.name)
+                    if m and m.get("live_domain") == host:
+                        slug = d.name
+                        break
     if not slug:
         return jsonify({"status": "error", "error": "Unknown project"}), 400
 
     meta = _load_meta(slug)
     if not meta:
         return jsonify({"status": "error", "error": "Project not found"}), 404
-
-    data = request.get_json() or {}
 
     # Honeypot check — silently accept bot submissions
     if data.get("_wb_hp"):
