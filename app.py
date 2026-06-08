@@ -14,6 +14,7 @@ import time
 import yaml
 import requests
 from copy import deepcopy
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +35,23 @@ ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 KIE_API_KEY = os.environ.get("KIE_API_KEY", "")
 KIE_BASE = "https://api.kie.ai/api/v1"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# ── Emailit ──────────────────────────────────────────────────
+EMAILIT_API_KEY = os.environ.get("EMAILIT_API_KEY", "")
+EMAILIT_FROM = "WebBeagle Forms <alerts@webbeagle.com>"
+EMAILIT_BASE = "https://api.emailit.com/v2"
+
+# ── Rate limiting for form submissions ──────────────────────
+_submission_tracker: dict = defaultdict(list)
+
+def _check_rate_limit(ip: str, max_per_minute: int = 5) -> bool:
+    now = time.time()
+    window = [t for t in _submission_tracker[ip] if now - t < 60]
+    _submission_tracker[ip] = window
+    if len(window) >= max_per_minute:
+        return False
+    _submission_tracker[ip].append(now)
+    return True
 
 # ── Load API clients ─────────────────────────────────────────
 def _get_openai_client():
@@ -380,6 +398,12 @@ def _render_preview(project_id, page_id):
 .wb-animated[data-animate="zoom-in"]     {{ animation-name: wb-zoom-in; }}
 [data-trigger="load"] .wb-animated,
 .wb-animated[style*="running"] {{ animation-play-state: running; }}
+/* ── Form success message ── */
+.wb-form-success {{
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 16px;
+}}
   </style>
 </head>
 <body>
@@ -493,6 +517,56 @@ def _render_preview(project_id, page_id):
 
   processContainers();
 }})();
+// ── WebBeagle Form Handler ──
+(function() {{
+  var forms = document.querySelectorAll('form[data-webbeagle-form]');
+  if (forms.length === 0) return;
+
+  forms.forEach(function(form) {{
+    // Inject honeypot
+    var hp = document.createElement('div');
+    hp.style.cssText = 'position:absolute;left:-9999px;top:-9999px;opacity:0;height:0;width:0;overflow:hidden;';
+    hp.innerHTML = '<input type="text" name="_wb_hp" tabindex="-1" autocomplete="off">';
+    form.appendChild(hp);
+
+    form.addEventListener('submit', function(e) {{
+      e.preventDefault();
+      var hpField = form.querySelector('input[name="_wb_hp"]');
+      if (hpField && hpField.value) return;
+
+      var btn = form.querySelector('button[type="submit"], input[type="submit"]');
+      var btnOrig = btn ? btn.innerHTML : '';
+      if (btn) {{ btn.disabled = true; btn.innerHTML = 'Sending...'; }}
+
+      var fd = new FormData(form);
+      var data = {{}};
+      fd.forEach(function(v, k) {{ if (k !== '_wb_hp') data[k] = v; }});
+
+      fetch('/api/submit-form', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(data)
+      }})
+      .then(function(r) {{ return r.json(); }})
+      .then(function(result) {{
+        if (result.status === 'ok') {{
+          var msg = form.getAttribute('data-form-thankyou') || 'Thank you! We\\'ll be in touch soon.';
+          var thankYou = document.createElement('div');
+          thankYou.className = 'wb-form-success';
+          thankYou.style.cssText = 'text-align:center;padding:32px 20px;';
+          thankYou.innerHTML = '<div style="font-size:48px;margin-bottom:12px;">&#10003;</div><p style="font-family:var(--font-heading,inherit);font-size:1.1rem;color:#fff;">' + msg + '</p>';
+          form.parentNode.replaceChild(thankYou, form);
+        }} else {{
+          throw new Error(result.error || 'Submission failed');
+        }}
+      }})
+      .catch(function(err) {{
+        if (btn) {{ btn.disabled = false; btn.innerHTML = btnOrig; }}
+        alert('Something went wrong. Please try again.');
+      }});
+    }});
+  }});
+}})();
 </script>
 </body>
 </html>"""
@@ -596,6 +670,9 @@ def create_project():
         "updated": now,
         "pages": ["home"],
         "theme_css": data.get("theme_css", ""),
+        "notification_email": data.get("notification_email", ""),
+        "recaptcha_site_key": data.get("recaptcha_site_key", ""),
+        "recaptcha_secret_key": data.get("recaptcha_secret_key", ""),
     }
     _save_meta(project_id, meta)
     page_dir = _page_path(project_id, "home").parent
@@ -625,6 +702,9 @@ def get_project(project_id):
         "pages": meta.get("pages", list(pages_data.keys())),
         "pages_data": pages_data,
         "theme_css": meta.get("theme_css", ""),
+        "notification_email": meta.get("notification_email", ""),
+        "recaptcha_site_key": meta.get("recaptcha_site_key", ""),
+        "recaptcha_secret_key": meta.get("recaptcha_secret_key", ""),
     })
 
 @app.route("/api/projects/<project_id>", methods=["PUT"])
@@ -638,6 +718,12 @@ def save_project(project_id):
         meta["name"] = data["name"]
     if "theme_css" in data:
         meta["theme_css"] = data["theme_css"]
+    if "notification_email" in data:
+        meta["notification_email"] = data["notification_email"]
+    if "recaptcha_site_key" in data:
+        meta["recaptcha_site_key"] = data["recaptcha_site_key"]
+    if "recaptcha_secret_key" in data:
+        meta["recaptcha_secret_key"] = data["recaptcha_secret_key"]
     meta["updated"] = now
     if "pages_data" in data:
         for page_id, page_data in data["pages_data"].items():
@@ -665,6 +751,125 @@ def delete_project(project_id):
         shutil.rmtree(pp)
         return jsonify({"status": "deleted"})
     return jsonify({"error": "Project not found"}), 404
+
+@app.route("/api/projects/<project_id>/settings", methods=["GET"])
+def get_project_settings(project_id):
+    meta = _load_meta(project_id)
+    if not meta:
+        return jsonify({"error": "Project not found"}), 404
+    return jsonify({
+        "notification_email": meta.get("notification_email", ""),
+        "recaptcha_site_key": meta.get("recaptcha_site_key", ""),
+        "recaptcha_secret_key": meta.get("recaptcha_secret_key", ""),
+    })
+
+@app.route("/api/projects/<project_id>/settings", methods=["PUT"])
+def update_project_settings(project_id):
+    meta = _load_meta(project_id)
+    if not meta:
+        return jsonify({"error": "Project not found"}), 404
+    data = request.get_json() or {}
+    for key in ["notification_email", "recaptcha_site_key", "recaptcha_secret_key"]:
+        if key in data:
+            meta[key] = data[key]
+    meta["updated"] = datetime.utcnow().isoformat()
+    _save_meta(project_id, meta)
+    return jsonify({"status": "saved"})
+
+# ══════════════════════════════════════════════════════════════
+#  Form Submissions → Emailit
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/api/submit-form", methods=["POST"])
+def submit_form():
+    # Resolve project from Host header
+    host = request.headers.get("Host", "")
+    slug = None
+    if ".preview.webbeagle.com" in host:
+        slug = host.split(".")[0]
+    else:
+        for d in PROJECTS_DIR.iterdir():
+            if d.is_dir():
+                m = _load_meta(d.name)
+                if m and m.get("live_domain") == host:
+                    slug = d.name
+                    break
+    if not slug:
+        return jsonify({"status": "error", "error": "Unknown project"}), 400
+
+    meta = _load_meta(slug)
+    if not meta:
+        return jsonify({"status": "error", "error": "Project not found"}), 404
+
+    data = request.get_json() or {}
+
+    # Honeypot check — silently accept bot submissions
+    if data.get("_wb_hp"):
+        return jsonify({"status": "ok"})
+
+    # Rate limit
+    if not _check_rate_limit(request.remote_addr):
+        return jsonify({"status": "error", "error": "Too many submissions. Please wait."}), 429
+
+    notification_email = meta.get("notification_email", "")
+    if not notification_email:
+        return jsonify({"status": "error", "error": "No notification email configured"}), 400
+
+    # Optional reCAPTCHA
+    recaptcha_secret = meta.get("recaptcha_secret_key", "")
+    recaptcha_token = data.pop("_recaptcha_token", None)
+    if recaptcha_secret and recaptcha_token:
+        rr = requests.post("https://www.google.com/recaptcha/api/siteverify", data={
+            "secret": recaptcha_secret,
+            "response": recaptcha_token,
+        }, timeout=10)
+        if not rr.json().get("success"):
+            return jsonify({"status": "error", "error": "reCAPTCHA validation failed"}), 400
+
+    # Build email HTML
+    fields_html = ""
+    for key, value in data.items():
+        if key.startswith("_"):
+            continue
+        fields_html += f'<tr><td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:600;color:#333;">{key}</td><td style="padding:8px 12px;border-bottom:1px solid #eee;">{value}</td></tr>'
+
+    email_html = f"""<!DOCTYPE html>
+<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+  <h2 style="color:#A383E6;">New Form Submission</h2>
+  <p style="color:#666;">Project: <strong>{meta.get('name', slug)}</strong></p>
+  <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+    {fields_html}
+  </table>
+  <p style="color:#999;font-size:12px;">Sent via WebBeagle Forms</p>
+</body></html>"""
+
+    # Send via Emailit
+    if not EMAILIT_API_KEY:
+        app.logger.warning("EMAILIT_API_KEY not configured — email not sent")
+    else:
+        try:
+            r = requests.post(
+                f"{EMAILIT_BASE}/emails",
+                headers={
+                    "Authorization": f"Bearer {EMAILIT_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": EMAILIT_FROM,
+                    "to": [notification_email],
+                    "subject": f"New form submission — {meta.get('name', slug)}",
+                    "html": email_html,
+                },
+                timeout=15,
+            )
+            if r.status_code not in (200, 201, 202):
+                app.logger.error(f"Emailit error: {r.status_code} {r.text}")
+                return jsonify({"status": "error", "error": "Failed to send notification"}), 500
+        except Exception as e:
+            app.logger.error(f"Emailit exception: {e}")
+            return jsonify({"status": "error", "error": "Failed to send notification"}), 500
+
+    return jsonify({"status": "ok"})
 
 @app.route("/api/projects/<project_id>/pages", methods=["POST"])
 def add_page(project_id):
