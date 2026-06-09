@@ -27,6 +27,7 @@ PROJECTS_DIR = Path("/opt/data/grapesjs-projects")
 COMPONENTS_DIR = Path("/opt/data/grapesjs-components")
 BUILDER_DIR = Path("/opt/data/grapesjs-demo")
 ASSETS_DIR = Path("/opt/data/grapesjs-assets")
+DOCS_DIR = Path("/opt/data/grapesjs-docs")
 CONFIG_PATH = Path("/opt/data/config.yaml")
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 COMPONENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -587,6 +588,11 @@ def standalone_preview():
 @app.route("/assets/<path:filename>")
 def serve_asset(filename):
     return send_from_directory(str(ASSETS_DIR), filename)
+
+@app.route("/docs/")
+@app.route("/docs/<path:filename>")
+def serve_docs(filename="index.html"):
+    return send_from_directory(str(DOCS_DIR), filename)
 
 
 @app.route("/api/assets/upload", methods=["POST"])
