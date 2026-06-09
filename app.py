@@ -664,6 +664,48 @@ form[data-webbeagle-form] .btn-primary {{ align-self: flex-start; min-width: 160
   }});
 }})();
 </script>
+<script src="https://builder.webbeagle.com/assets/wp-interactions-full.js"></script>
+<script>
+(function() {{
+  'use strict';
+  function setupConfetti() {{
+    InteractRunner.configure([{{
+      key: 'cta_confetti',
+      title: 'CTA Confetti',
+      type: 'click',
+      target: {{ type: 'selector', value: '#cta-get-started' }},
+      timelines: [{{
+        loop: false,
+        onceOnly: false,
+        alternate: false,
+        reset: false,
+        reverse: false,
+        actions: [{{
+          type: 'confetti',
+          key: 'confetti_1',
+          target: {{ type: 'trigger' }},
+          timing: {{
+            isStartingState: false,
+            start: 0,
+            duration: 0.5,
+            easing: 'outCirc'
+          }},
+          value: {{}}
+        }}]
+      }}],
+      options: []
+    }}]);
+    InteractRunner.init();
+  }}
+  if (typeof InteractRunner !== 'undefined') {{
+    setupConfetti();
+  }} else {{
+    window.addEventListener('load', function() {{
+      if (typeof InteractRunner !== 'undefined') setupConfetti();
+    }});
+  }}
+}})();
+</script>
 </body>
 </html>"""
 
