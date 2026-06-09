@@ -78,6 +78,11 @@ def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    # Aggressive no-cache for JS files to prevent Cloudflare stale cache
+    if response.content_type and "javascript" in response.content_type:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 # ══════════════════════════════════════════════════════════════
@@ -258,6 +263,27 @@ def _save_meta(project_id, meta):
 def _sanitize_slug(s):
     return re.sub(r"[^a-z0-9-]", "", s.lower().replace(" ", "-"))[:40]
 
+
+def _ensure_form_attrs(components, depth=0):
+    """Walk component tree and ensure every form has data-webbeagle-form attribute.
+    Returns True if any form was touched (for logging)."""
+    touched = False
+    if isinstance(components, list):
+        for comp in components:
+            if _ensure_form_attrs(comp, depth + 1):
+                touched = True
+    elif isinstance(components, dict):
+        node_type = components.get("type", "")
+        if node_type == "form":
+            attrs = components.setdefault("attributes", {})
+            if "data-webbeagle-form" not in attrs:
+                attrs["data-webbeagle-form"] = "true"
+                touched = True
+        if "components" in components:
+            if _ensure_form_attrs(components["components"], depth + 1):
+                touched = True
+    return touched
+
 # ── GrapesJS JSON → HTML converter ─────────────────────────────
 VOID_ELEMENTS = {"br", "hr", "img", "input", "meta", "link", "source", "area",
                  "base", "col", "embed", "track", "wbr"}
@@ -356,6 +382,14 @@ def _render_preview(project_id, page_id):
         components_html = _gjs_to_html(raw_components)
     else:
         components_html = str(raw_components)
+
+    # Safety net: ensure every <form> has data-webbeagle-form attribute
+    # (GrapesJS can drop empty attributes; this guarantees forms work on publish)
+    components_html = re.sub(
+        r'<form\b((?!data-webbeagle-form)[^>]*)>',
+        r'<form data-webbeagle-form="true"\1>',
+        components_html
+    )
     styles_css = page_data.get("styles", "")
     css_raw = meta.get("theme_css", "")
 
@@ -378,6 +412,7 @@ def _render_preview(project_id, page_id):
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{meta.get('name', 'Preview')} — {page_id}</title>
+  <link rel="icon" type="image/png" href="{meta.get('favicon_url', '')}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
   <style>{css_raw}</style>
@@ -581,6 +616,29 @@ form[data-webbeagle-form] .btn-primary {{ align-self: flex-start; min-width: 160
       var btnOrig = btn ? btn.innerHTML : '';
       if (btn) {{ btn.disabled = true; btn.innerHTML = 'Sending...'; }}
 
+      // Auto-assign name attributes to nameless fields
+      // (FormData only collects fields with a name — GrapesJS often omits them)
+      var fields = form.querySelectorAll('input:not([type=\"submit\"]):not([type=\"hidden\"]), textarea, select');
+      var usedNames = {{}};
+      fields.forEach(function(field) {{
+        if (field.getAttribute('name')) {{
+          usedNames[field.getAttribute('name')] = true;
+        }}
+      }});
+      fields.forEach(function(field) {{
+        if (!field.getAttribute('name')) {{
+          var placeholder = (field.getAttribute('placeholder') || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+          var name = placeholder || field.type || 'field';
+          if (usedNames[name]) {{
+            var i = 2;
+            while (usedNames[name + '_' + i]) i++;
+            name = name + '_' + i;
+          }}
+          usedNames[name] = true;
+          field.setAttribute('name', name);
+        }}
+      }});
+
       var fd = new FormData(form);
       var data = {{}};
       fd.forEach(function(v, k) {{ if (k !== '_wb_hp') data[k] = v; }});
@@ -612,6 +670,8 @@ form[data-webbeagle-form] .btn-primary {{ align-self: flex-start; min-width: 160
   }});
 }})();
 </script>
+<script src="https://builder.webbeagle.com/assets/wp-interactions-full.js"></script>
+<script src="https://builder.webbeagle.com/interactivity.js"></script>
 </body>
 </html>"""
 
@@ -773,15 +833,24 @@ def save_project(project_id):
         meta["recaptcha_site_key"] = data["recaptcha_site_key"]
     if "recaptcha_secret_key" in data:
         meta["recaptcha_secret_key"] = data["recaptcha_secret_key"]
+    if "favicon_url" in data:
+        meta["favicon_url"] = data["favicon_url"]
     meta["updated"] = now
     if "pages_data" in data:
         for page_id, page_data in data["pages_data"].items():
+            # Auto-inject data-webbeagle-form on any form component
+            components = page_data.get("components")
+            if components:
+                _ensure_form_attrs(components)
             pp = _page_path(project_id, page_id)
             pp.parent.mkdir(parents=True, exist_ok=True)
             pp.write_text(json.dumps(page_data, indent=2))
         meta["pages"] = list(data["pages_data"].keys())
     elif "components" in data or "styles" in data:
         page_id = data.get("page_id", "home")
+        components = data.get("components", "")
+        if components:
+            _ensure_form_attrs(components)
         pp = _page_path(project_id, page_id)
         pp.parent.mkdir(parents=True, exist_ok=True)
         pp.write_text(json.dumps({
@@ -810,6 +879,7 @@ def get_project_settings(project_id):
         "notification_email": meta.get("notification_email", ""),
         "recaptcha_site_key": meta.get("recaptcha_site_key", ""),
         "recaptcha_secret_key": meta.get("recaptcha_secret_key", ""),
+        "favicon_url": meta.get("favicon_url", ""),
     })
 
 @app.route("/api/projects/<project_id>/settings", methods=["PUT"])
@@ -818,7 +888,7 @@ def update_project_settings(project_id):
     if not meta:
         return jsonify({"error": "Project not found"}), 404
     data = request.get_json() or {}
-    for key in ["notification_email", "recaptcha_site_key", "recaptcha_secret_key"]:
+    for key in ["notification_email", "recaptcha_site_key", "recaptcha_secret_key", "favicon_url"]:
         if key in data:
             meta[key] = data[key]
     meta["updated"] = datetime.utcnow().isoformat()
