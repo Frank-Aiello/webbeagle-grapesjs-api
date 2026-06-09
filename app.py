@@ -673,7 +673,7 @@ form[data-webbeagle-form] .btn-primary {{ align-self: flex-start; min-width: 160
       key: 'cta_confetti',
       title: 'CTA Confetti',
       type: 'click',
-      target: {{ type: 'selector', value: '#cta-get-started' }},
+      target: {{ type: 'selector', value: '.cta-section .btn-white' }},
       timelines: [{{
         loop: false,
         onceOnly: false,
