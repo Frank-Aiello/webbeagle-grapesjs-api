@@ -258,6 +258,27 @@ def _save_meta(project_id, meta):
 def _sanitize_slug(s):
     return re.sub(r"[^a-z0-9-]", "", s.lower().replace(" ", "-"))[:40]
 
+
+def _ensure_form_attrs(components, depth=0):
+    """Walk component tree and ensure every form has data-webbeagle-form attribute.
+    Returns True if any form was touched (for logging)."""
+    touched = False
+    if isinstance(components, list):
+        for comp in components:
+            if _ensure_form_attrs(comp, depth + 1):
+                touched = True
+    elif isinstance(components, dict):
+        node_type = components.get("type", "")
+        if node_type == "form":
+            attrs = components.setdefault("attributes", {})
+            if "data-webbeagle-form" not in attrs:
+                attrs["data-webbeagle-form"] = "true"
+                touched = True
+        if "components" in components:
+            if _ensure_form_attrs(components["components"], depth + 1):
+                touched = True
+    return touched
+
 # ── GrapesJS JSON → HTML converter ─────────────────────────────
 VOID_ELEMENTS = {"br", "hr", "img", "input", "meta", "link", "source", "area",
                  "base", "col", "embed", "track", "wbr"}
@@ -356,6 +377,14 @@ def _render_preview(project_id, page_id):
         components_html = _gjs_to_html(raw_components)
     else:
         components_html = str(raw_components)
+
+    # Safety net: ensure every <form> has data-webbeagle-form attribute
+    # (GrapesJS can drop empty attributes; this guarantees forms work on publish)
+    components_html = re.sub(
+        r'<form\b((?!data-webbeagle-form)[^>]*)>',
+        r'<form data-webbeagle-form="true"\1>',
+        components_html
+    )
     styles_css = page_data.get("styles", "")
     css_raw = meta.get("theme_css", "")
 
@@ -776,12 +805,19 @@ def save_project(project_id):
     meta["updated"] = now
     if "pages_data" in data:
         for page_id, page_data in data["pages_data"].items():
+            # Auto-inject data-webbeagle-form on any form component
+            components = page_data.get("components")
+            if components:
+                _ensure_form_attrs(components)
             pp = _page_path(project_id, page_id)
             pp.parent.mkdir(parents=True, exist_ok=True)
             pp.write_text(json.dumps(page_data, indent=2))
         meta["pages"] = list(data["pages_data"].keys())
     elif "components" in data or "styles" in data:
         page_id = data.get("page_id", "home")
+        components = data.get("components", "")
+        if components:
+            _ensure_form_attrs(components)
         pp = _page_path(project_id, page_id)
         pp.parent.mkdir(parents=True, exist_ok=True)
         pp.write_text(json.dumps({
