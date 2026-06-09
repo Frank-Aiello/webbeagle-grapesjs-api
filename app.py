@@ -318,8 +318,7 @@ def _gjs_to_html(node):
     if attrs:
         parts = []
         for k, v in attrs.items():
-            if v:
-                parts.append(f'{k}="{v}"')
+            parts.append(f'{k}="{v}"')
         if parts:
             attr_str = " " + " ".join(parts)
 
