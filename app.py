@@ -610,6 +610,29 @@ form[data-webbeagle-form] .btn-primary {{ align-self: flex-start; min-width: 160
       var btnOrig = btn ? btn.innerHTML : '';
       if (btn) {{ btn.disabled = true; btn.innerHTML = 'Sending...'; }}
 
+      // Auto-assign name attributes to nameless fields
+      // (FormData only collects fields with a name — GrapesJS often omits them)
+      var fields = form.querySelectorAll('input:not([type=\"submit\"]):not([type=\"hidden\"]), textarea, select');
+      var usedNames = {{}};
+      fields.forEach(function(field) {{
+        if (field.getAttribute('name')) {{
+          usedNames[field.getAttribute('name')] = true;
+        }}
+      }});
+      fields.forEach(function(field) {{
+        if (!field.getAttribute('name')) {{
+          var placeholder = (field.getAttribute('placeholder') || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+          var name = placeholder || field.type || 'field';
+          if (usedNames[name]) {{
+            var i = 2;
+            while (usedNames[name + '_' + i]) i++;
+            name = name + '_' + i;
+          }}
+          usedNames[name] = true;
+          field.setAttribute('name', name);
+        }}
+      }});
+
       var fd = new FormData(form);
       var data = {{}};
       fd.forEach(function(v, k) {{ if (k !== '_wb_hp') data[k] = v; }});
