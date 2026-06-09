@@ -412,6 +412,27 @@ def _render_preview(project_id, page_id):
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 16px;
 }}
+/* ── Form field defaults ── */
+form[data-webbeagle-form] {{ max-width: 560px; margin: 0 auto; }}
+form[data-webbeagle-form] > div {{ display: flex; flex-direction: column; gap: 16px; }}
+form[data-webbeagle-form] input[type="text"],
+form[data-webbeagle-form] input[type="email"],
+form[data-webbeagle-form] textarea {{
+  width: 100%; padding: 14px 18px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  color: #fff; font-size: 15px;
+  font-family: var(--font-body, 'Inter', sans-serif);
+  outline: none; transition: border-color .3s, box-shadow .3s;
+}}
+form[data-webbeagle-form] input:focus,
+form[data-webbeagle-form] textarea:focus {{
+  border-color: var(--accent, #A383E6);
+  box-shadow: 0 0 0 3px rgba(163,131,230,.15);
+}}
+form[data-webbeagle-form] textarea {{ min-height: 120px; resize: vertical; }}
+form[data-webbeagle-form] .btn-primary {{ align-self: flex-start; min-width: 160px; }}
   </style>
 </head>
 <body>
