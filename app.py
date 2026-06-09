@@ -292,6 +292,8 @@ def _gjs_to_html(node):
             tag = "video"
         elif node_type == "map":
             tag = "iframe"
+        elif node_type in ("form", "input", "textarea", "button", "select", "option", "label"):
+            tag = node_type
 
     # Build attributes
     attrs = {}
@@ -331,6 +333,11 @@ def _gjs_to_html(node):
         children_html = _gjs_to_html(node["components"])
     elif "content" in node:
         children_html = node["content"]
+
+    # Auto-wrap .btn-primary text in <span> for rotating gradient border CSS
+    node_classes = node.get("classes") or []
+    if "btn-primary" in node_classes and children_html and not children_html.strip().startswith("<span"):
+        children_html = f"<span>{children_html}</span>"
 
     return f"<{tag}{attr_str}>{children_html}</{tag}>"
 
