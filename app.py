@@ -358,6 +358,20 @@ def _render_preview(project_id, page_id):
         components_html = str(raw_components)
     styles_css = page_data.get("styles", "")
     css_raw = meta.get("theme_css", "")
+
+    # Collect CSS from all components (so library components render on published pages)
+    components_css = ""
+    if COMPONENTS_DIR.exists():
+        for cat_dir in COMPONENTS_DIR.iterdir():
+            if cat_dir.is_dir():
+                for comp_file in cat_dir.glob("*.json"):
+                    try:
+                        comp = json.loads(comp_file.read_text())
+                        if comp.get("css"):
+                            components_css += f"/* {comp.get('name', comp_file.stem)} */\n{comp['css']}\n"
+                    except Exception:
+                        pass
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -368,6 +382,7 @@ def _render_preview(project_id, page_id):
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
   <style>{css_raw}</style>
   <style>{styles_css}</style>
+  <style>{components_css}</style>
   <style>
 /* ── WebBeagle Animation System v2 (published runtime) ── */
 @keyframes wb-fade-up {{
