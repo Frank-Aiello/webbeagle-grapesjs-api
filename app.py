@@ -18,6 +18,10 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv(Path("/opt/data/.env"))
+load_dotenv(Path("/etc/grapesjs-api/env"))  # optional, doesn't error if missing
+
 from flask import Flask, request, jsonify, send_from_directory
 from openai import OpenAI
 from anthropic import Anthropic
@@ -36,6 +40,7 @@ ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 KIE_API_KEY = os.environ.get("KIE_API_KEY", "")
 KIE_BASE = "https://api.kie.ai/api/v1"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 # ── Emailit ──────────────────────────────────────────────────
 EMAILIT_API_KEY = os.environ.get("EMAILIT_API_KEY", "")
@@ -69,6 +74,15 @@ def _get_openai_client():
 
 ai_client = _get_openai_client()
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+
+# ── Gemini (Google AI) ────────────────────────────────────────
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+gemini_client = None
+if GOOGLE_API_KEY:
+    import google.generativeai as genai
+    genai.configure(api_key=GOOGLE_API_KEY)
+    gemini_client = genai.GenerativeModel(GEMINI_MODEL)
 
 # ── App ──────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=str(BUILDER_DIR), static_url_path="")
@@ -1002,7 +1016,9 @@ def health():
     return jsonify({
         "status": "ok",
         "time": datetime.utcnow().isoformat(),
+        "ai_provider": _ai_provider,
         "claude": anthropic_client is not None,
+        "gemini": gemini_client is not None,
         "kie": bool(KIE_API_KEY)
     })
 
@@ -1325,8 +1341,47 @@ def serve_raw(project_id, page_id):
 </html>"""
 
 # ══════════════════════════════════════════════════════════════
-#  AI — Section Generation (Claude Sonnet 4)
+#  AI — Section Generation (Claude Sonnet 4 / Gemini)
 # ══════════════════════════════════════════════════════════════
+
+_ai_provider = os.environ.get("AI_PROVIDER", "anthropic")  # "anthropic" or "gemini"
+
+def _ai_generate(system_msg: str, user_msg, max_tokens: int = 4000) -> str:
+    """Dispatch to the configured AI provider."""
+    if _ai_provider == "gemini":
+        return _gemini_generate(system_msg, user_msg, max_tokens)
+    return _claude_generate(system_msg, user_msg, max_tokens)
+
+def _gemini_generate(system_msg: str, user_msg, max_tokens: int = 8000) -> str:
+    """Generate HTML using Gemini — strong at vision-to-code."""
+    if not gemini_client:
+        return _claude_generate(system_msg, user_msg, max_tokens)
+    
+    # Build contents for Gemini
+    parts = [{"text": system_msg}]
+    if isinstance(user_msg, str):
+        parts.append({"text": user_msg})
+    else:
+        for block in user_msg:
+            if block.get("type") == "text":
+                parts.append({"text": block["text"]})
+            elif block.get("type") == "image":
+                import requests as req, base64
+                img_url = block.get("source", {}).get("url", "")
+                if img_url.startswith("data:"):
+                    parts.append({"inline_data": {"mime_type": "image/png", "data": img_url.split(",", 1)[1]}})
+                else:
+                    img_data = req.get(img_url, timeout=30).content
+                    parts.append({"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img_data).decode()}})
+    
+    response = gemini_client.generate_content(
+        parts,
+        generation_config={
+            "max_output_tokens": max_tokens,
+            "temperature": 0.7,
+        }
+    )
+    return response.text.strip()
 
 def _claude_generate(system_msg: str, user_msg, max_tokens: int = 4000) -> str:
     """Generate HTML using Claude Sonnet 4 — best for web design.
@@ -1382,7 +1437,7 @@ def _claude_generate(system_msg: str, user_msg, max_tokens: int = 4000) -> str:
                 user_content.append(block)
 
     response = anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=ANTHROPIC_MODEL,
         max_tokens=max_tokens,
         temperature=0.7,
         system=system_msg,
@@ -1508,7 +1563,7 @@ CRITICAL RULES:
 - If there's a background image, note its position (right/left/full)
 - If text has strikethrough prices, mark them with "strikethrough": true"""
 
-            spec_json = _claude_generate(vision_prompt, [
+            spec_json = _ai_generate(vision_prompt, [
                 {"type": "text", "text": "Extract exact layout spec from this design image."},
                 {"type": "image", "source": {"type": "url", "url": vision_url}}
             ], max_tokens=2000)
@@ -1544,9 +1599,9 @@ CRITICAL RULES:
 10. ALL styles must be INLINE (style="...") — no CSS classes except what's needed for layout
 11. Return ONLY the HTML. No markdown, no explanations, no backticks."""
 
-            generated = _claude_generate(build_prompt, "Build the section matching this exact spec.", max_tokens=4000)
+            generated = _ai_generate(build_prompt, "Build the section matching this exact spec.", max_tokens=4000)
         else:
-            generated = _claude_generate(system_msg, prompt)
+            generated = _ai_generate(system_msg, prompt)
 
         # Strip markdown code blocks if present
         if generated.startswith("```"):
@@ -1557,7 +1612,7 @@ CRITICAL RULES:
                 lines = lines[:-1]
             generated = "\n".join(lines)
 
-        return jsonify({"html": generated, "model": "claude-sonnet-4", "spec": spec if vision_url else None})
+        return jsonify({"html": generated, "model": ANTHROPIC_MODEL, "spec": spec if vision_url else None})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1597,7 +1652,7 @@ def ai_perfect_hero():
 }"""
 
     try:
-        spec_json = _claude_generate(vision_prompt, [
+        spec_json = _ai_generate(vision_prompt, [
             {"type": "text", "text": "Extract the exact layout from this design."},
             {"type": "image", "source": {"type": "url", "url": design_image_url}}
         ], max_tokens=2000)
@@ -1633,7 +1688,7 @@ Hero video/image: {video_asset or 'NONE — use a dark gradient placeholder'}
 Return ONLY the hero section HTML. No markdown, no explanations."""
 
     try:
-        hero_html = _claude_generate(build_prompt, "Build the hero section matching this exact spec.", max_tokens=4000)
+        hero_html = _ai_generate(build_prompt, "Build the hero section matching this exact spec.", max_tokens=4000)
         if hero_html.startswith("```"):
             lines = hero_html.split("\n")
             if lines[0].startswith("```"):
@@ -1754,7 +1809,7 @@ def ai_refine_hero():
 }""" + font_hint
 
         try:
-            spec_json = _claude_generate(vision_prompt, [
+            spec_json = _ai_generate(vision_prompt, [
                 {"type": "text", "text": "Extract the exact layout from this design."},
                 {"type": "image", "source": {"type": "url", "url": design_image_url}}
             ], max_tokens=2000)
@@ -1840,7 +1895,7 @@ Hero video/image: {video_asset or 'NONE — use a dark gradient'}
 10. Striped badge: use two <span> elements side by side — first with left_bg, second with right_bg"""
 
         try:
-            hero_html = _claude_generate(build_prompt, "Build the hero section.", max_tokens=4000)
+            hero_html = _ai_generate(build_prompt, "Build the hero section.", max_tokens=4000)
             if hero_html.startswith("```"):
                 lines = hero_html.split("\n")
                 if lines[0].startswith("```"):
@@ -1915,7 +1970,7 @@ Output ONLY a JSON object:
 If match_score >= 95, set discrepancies to empty array []."""
 
         try:
-            compare_result = _claude_generate(compare_prompt, [
+            compare_result = _ai_generate(compare_prompt, [
                 {"type": "text", "text": "ORIGINAL DESIGN (reference):"},
                 {"type": "image", "source": {"type": "url", "url": design_image_url}},
                 {"type": "text", "text": "RENDERED SCREENSHOT (what we built):"},
@@ -1966,7 +2021,7 @@ If match_score >= 95, set discrepancies to empty array []."""
 4. No markdown, no explanations"""
 
         try:
-            fixed_html = _claude_generate(fix_prompt, [
+            fixed_html = _ai_generate(fix_prompt, [
                 {"type": "text", "text": "Fix these specific discrepancies. Reference the original design:"},
                 {"type": "image", "source": {"type": "url", "url": design_image_url}}
             ], max_tokens=4000)
@@ -2188,7 +2243,7 @@ Apply to text: `filter:url(#distress);`
 {asset_info}"""
     
     try:
-        generated_html = _claude_generate(generation_prompt, [
+        generated_html = _ai_generate(generation_prompt, [
             {"type": "text", "text": prompt},
             {"type": "image", "source": {"type": "url", "url": mockup_url}}
         ], max_tokens=8000)
@@ -2241,7 +2296,7 @@ Output a JSON diff object with actionable fixes:
 
 If score >= 90, add "PASS": true to the JSON."""
                 
-                diff_json = _claude_generate(compare_prompt, [
+                diff_json = _ai_generate(compare_prompt, [
                     {"type": "text", "text": "Compare these two images and find differences."},
                     {"type": "image", "source": {"type": "url", "url": f"data:image/png;base64,{rendered_b64.split(',')[1] if ',' in rendered_b64 else rendered_b64}"}},
                     {"type": "image", "source": {"type": "url", "url": mockup_url}}
@@ -2268,7 +2323,7 @@ If score >= 90, add "PASS": true to the JSON."""
 Rewrite the HTML to fix ALL of these issues. Keep everything that was already correct.
 Return ONLY the complete fixed HTML. No markdown, no explanations."""
                 
-                fixed_html = _claude_generate(fix_prompt, [
+                fixed_html = _ai_generate(fix_prompt, [
                     {"type": "text", "text": "Fix these layout differences to match the mockup exactly."},
                     {"type": "image", "source": {"type": "url", "url": mockup_url}}
                 ], max_tokens=8000)
@@ -2344,7 +2399,7 @@ Identify SPECIFIC differences in positioning, sizes, colors, missing elements, a
 Output a JSON diff: {"score": 0-100, "differences": ["fix 1", "fix 2"], "critical_fixes": ["must-fix"]}
 If score >= 90, add "PASS": true."""
             
-            diff_json = _claude_generate(compare_prompt, [
+            diff_json = _ai_generate(compare_prompt, [
                 {"type": "text", "text": "Compare these two images and find differences."},
                 {"type": "image", "source": {"type": "url", "url": f"data:image/png;base64,{rendered_b64.split(',')[1] if ',' in rendered_b64 else rendered_b64}"}},
                 {"type": "image", "source": {"type": "url", "url": mockup_url}}
@@ -2369,7 +2424,7 @@ If score >= 90, add "PASS": true."""
 
 Rewrite the HTML to fix ALL issues. Return ONLY the complete fixed HTML. No markdown."""
             
-            fixed_html = _claude_generate(fix_prompt, [
+            fixed_html = _ai_generate(fix_prompt, [
                 {"type": "text", "text": "Fix these layout differences to match the mockup exactly."},
                 {"type": "image", "source": {"type": "url", "url": mockup_url}}
             ], max_tokens=8000)
@@ -2862,7 +2917,7 @@ def ai_redesign():
 
 Return ONLY the CSS. No markdown, no explanations, no HTML. Every hex color must be EXACTLY what you see in the image."""
     try:
-        theme_css = _claude_generate(vision_css_prompt, [
+        theme_css = _ai_generate(vision_css_prompt, [
             {"type": "text", "text": "Generate the CSS for this design."},
             {"type": "image", "source": {"type": "url", "url": design_image_url}}
         ], max_tokens=4000)
@@ -2955,7 +3010,7 @@ Rebuild the entire site as a single HTML page. CRITICAL RULES:
 Return ONLY the complete HTML. No markdown, no explanations. The page MUST be pixel-perfect to the theme CSS."""
 
     try:
-        full_html = _claude_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=20000)
+        full_html = _ai_generate(assembly_prompt, "Rebuild this website with the new theme.", max_tokens=20000)
         # Strip markdown wrappers
         if full_html.startswith("```"):
             lines = full_html.split("\n")
