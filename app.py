@@ -226,7 +226,51 @@ def route_by_subdomain():
             project_path = PROJECTS_DIR / subdomain
             if project_path.exists() and project_path.is_dir():
                 path = request.path.strip('/')
+                # Raw HTML bypass: serve from raw-{page}.html directly, no GrapesJS processing
+                if path.startswith('raw/'):
+                    raw_page = path[4:] or 'home'
+                    raw_path = PROJECTS_DIR / subdomain / f"raw-{raw_page}.html"
+                    if raw_path.exists():
+                        raw_html = raw_path.read_text()
+                        theme_css = ""
+                        meta_path = PROJECTS_DIR / subdomain / "meta.json"
+                        if meta_path.exists():
+                            meta = json.loads(meta_path.read_text())
+                            theme_css = meta.get("theme_css", "")
+                        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{subdomain} - {raw_page}</title>
+  <style>{theme_css}</style>
+</head>
+<body style="margin:0;padding:0;background:#050505;">
+{raw_html}
+</body>
+</html>"""
                 page_id = path if path else 'home'
+                # Prefer raw HTML if available (preserves inline styles exactly)
+                raw_path_check = PROJECTS_DIR / subdomain / f"raw-{page_id}.html"
+                if raw_path_check.exists():
+                    raw_html = raw_path_check.read_text()
+                    theme_css = ""
+                    meta_path = PROJECTS_DIR / subdomain / "meta.json"
+                    if meta_path.exists():
+                        meta = json.loads(meta_path.read_text())
+                        theme_css = meta.get("theme_css", "")
+                    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{subdomain} - {page_id}</title>
+  <style>{theme_css}</style>
+</head>
+<body style="margin:0;padding:0;background:#050505;">
+{raw_html}
+</body>
+</html>"""
                 html = _render_preview(subdomain, page_id)
                 if html:
                     return html
@@ -1253,6 +1297,32 @@ def preview(project_id, page_id):
     if html is None:
         return jsonify({"error": "Project or page not found"}), 404
     return html
+
+@app.route("/raw/<project_id>/<page_id>/")
+@app.route("/raw/<project_id>/<page_id>")
+def serve_raw(project_id, page_id):
+    """Serve a page from raw HTML file, bypassing GrapesJS entirely."""
+    raw_path = PROJECTS_DIR / project_id / f"raw-{page_id}.html"
+    if not raw_path.exists():
+        return "Raw page not found", 404
+    html = raw_path.read_text()
+    theme_css = ""
+    meta_path = PROJECTS_DIR / project_id / "meta.json"
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        theme_css = meta.get("theme_css", "")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{project_id} - {page_id}</title>
+  <style>{theme_css}</style>
+</head>
+<body style="margin:0;padding:0;background:#050505;">
+{html}
+</body>
+</html>"""
 
 # ══════════════════════════════════════════════════════════════
 #  AI — Section Generation (Claude Sonnet 4)
