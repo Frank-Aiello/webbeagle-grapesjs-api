@@ -78,6 +78,11 @@ def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    # Aggressive no-cache for JS files to prevent Cloudflare stale cache
+    if response.content_type and 'javascript' in response.content_type:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 # ══════════════════════════════════════════════════════════════
@@ -255,6 +260,21 @@ def _save_meta(project_id, meta):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(meta, indent=2))
 
+def _backup_page(pp):
+    """Create a timestamped backup of a page file before it gets overwritten.
+    Keeps the last 20 backups, oldest are auto-purged."""
+    if not pp.exists():
+        return
+    backup_dir = pp.parent / ".backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    backup_path = backup_dir / f"{pp.stem}-{ts}.json"
+    shutil.copy2(pp, backup_path)
+    # Purge old backups: keep only the 20 most recent
+    existing = sorted(backup_dir.glob(f"{pp.stem}-*.json"))
+    for old in existing[:-20]:
+        old.unlink()
+
 def _sanitize_slug(s):
     return re.sub(r"[^a-z0-9-]", "", s.lower().replace(" ", "-"))[:40]
 
@@ -362,6 +382,125 @@ def _gjs_to_html(node):
     return f"<{tag}{attr_str}>{children_html}</{tag}>"
 
 
+def _gjs_styles_to_css(styles):
+    """Convert GrapesJS style array to CSS string.
+
+    Handles:
+    - Bare class names (adds '.' prefix)
+    - Pseudo-class/element via 'state' field (hover, :before, :after)
+    - @keyframes via atRuleType='keyframes'
+    - @media queries via atRuleType='media'
+    - selectorsAdd as the primary selector for at-rules
+    """
+    if isinstance(styles, str):
+        return styles
+    if not isinstance(styles, list):
+        return ""
+
+    # Group @keyframes and @media blocks (they span multiple items)
+    at_rule_blocks = {}  # key -> {"type": "keyframes"|"media", "text": "...", "items": [...]}
+    for item in styles:
+        at_type = item.get("atRuleType")
+        if at_type in ("keyframes", "media"):
+            key = f"{at_type}:{item.get('mediaText', '')}"
+            if key not in at_rule_blocks:
+                at_rule_blocks[key] = {"type": at_type, "text": item.get("mediaText", ""), "items": []}
+            at_rule_blocks[key]["items"].append(item)
+
+    css_parts = []
+
+    for item in styles:
+        if not isinstance(item, dict):
+            continue
+
+        # Skip items that belong to an at-rule block (handled separately)
+        at_type = item.get("atRuleType")
+        if at_type in ("keyframes", "media"):
+            continue
+
+        style = item.get("style", {})
+        if not style:
+            continue
+
+        # Get selectors — use selectorsAdd as primary for at-rule items, selectors for regular
+        selectors = item.get("selectors", [])
+        selectors_add = item.get("selectorsAdd", "")
+
+        if isinstance(selectors, str):
+            selectors = [selectors]
+
+        # Build full selector list (combine selectors + selectorsAdd)
+        all_sels = list(selectors)
+        if selectors_add and selectors_add not in all_sels:
+            all_sels.append(selectors_add)
+
+        # Handle pseudo-class/element state (hover, :before, :after, etc.)
+        state = item.get("state", "").strip()
+        if state:
+            if not state.startswith(":"):
+                state = ":" + state
+
+        # Prefix class selectors with '.' (GrapesJS stores them without dots)
+        full_selectors = []
+        for s in all_sels:
+            s = s.strip()
+            if not s:
+                continue
+            # Keyframe percentages (0%, 100%, etc.) — pass through as-is
+            if s.endswith("%") and s[:-1].replace(".", "").isdigit():
+                full_selectors.append(s)
+                continue
+            # Already has CSS prefix — pass through
+            if s[0] in ('.', '#', ':', '[', '@', '*'):
+                full_selectors.append(s)
+            else:
+                full_selectors.append('.' + s)
+
+        if not full_selectors:
+            continue
+
+        # Append state to EACH selector (so .btn-primary:hover, nav-link:hover both work)
+        if state:
+            full_selectors = [s + state for s in full_selectors]
+
+        props = "; ".join(f"{k}: {v}" for k, v in style.items() if v and not k.startswith('__'))
+        if props:
+            css_parts.append(f"{', '.join(full_selectors)} {{ {props}; }}")
+
+    # Render @keyframes blocks
+    for key, block in at_rule_blocks.items():
+        if block["type"] == "keyframes":
+            frames = []
+            for fitem in block["items"]:
+                frame_sel = fitem.get("selectorsAdd", "").strip()
+                frame_style = fitem.get("style", {})
+                frame_props = "; ".join(f"{k}: {v}" for k, v in frame_style.items() if v and not k.startswith('__'))
+                if frame_sel and frame_props:
+                    frames.append(f"  {frame_sel} {{ {frame_props}; }}")
+            if frames:
+                css_parts.append(f"@keyframes {block['text']} {{\n" + "\n".join(frames) + "\n}")
+
+    # Render @media blocks
+    for key, block in at_rule_blocks.items():
+        if block["type"] == "media":
+            media_rules = []
+            for mitem in block["items"]:
+                m_sel = mitem.get("selectorsAdd", "").strip()
+                m_style = mitem.get("style", {})
+                if not m_sel or not m_style:
+                    continue
+                # Prefix class selectors
+                if m_sel and not m_sel[0] in ('.', '#', ':', '[', '@', '*') and not (m_sel.endswith("%") and m_sel[:-1].replace(".","").isdigit()):
+                    m_sel = '.' + m_sel
+                m_props = "; ".join(f"{k}: {v}" for k, v in m_style.items() if v and not k.startswith('__'))
+                if m_props:
+                    media_rules.append(f"  {m_sel} {{ {m_props}; }}")
+            if media_rules:
+                css_parts.append(f"@media {block['text']} {{\n" + "\n".join(media_rules) + "\n}")
+
+    return "\n".join(css_parts)
+
+
 def _render_preview(project_id, page_id):
     """Build a standalone HTML page from saved project data."""
     meta = _load_meta(project_id)
@@ -385,7 +524,7 @@ def _render_preview(project_id, page_id):
         r'<form data-webbeagle-form="true"\1>',
         components_html
     )
-    styles_css = page_data.get("styles", "")
+    styles_css = _gjs_styles_to_css(page_data.get("styles", ""))
     css_raw = meta.get("theme_css", "")
 
     # Collect CSS from all components (so library components render on published pages)
@@ -760,6 +899,55 @@ def upload_asset():
         "size": os.path.getsize(str(ASSETS_DIR / name))
     }), 201
 
+@app.route("/api/assets/upload-zip", methods=["POST"])
+def upload_assets_zip():
+    """Upload a ZIP file of asset images. Extracts them to the assets directory.
+    These assets are then used by the pixel-perfect layout pipeline."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    f = request.files["file"]
+    if f.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+
+    if not f.filename.lower().endswith(".zip"):
+        return jsonify({"error": "File must be a .zip"}), 400
+
+    import zipfile, io
+    extracted = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(f.read())) as zf:
+            for name in zf.namelist():
+                # Skip directories and hidden files
+                if name.endswith("/") or name.startswith(".") or name.startswith("__"):
+                    continue
+                # Only extract image files
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if ext not in {"png", "jpg", "jpeg", "webp", "gif", "svg"}:
+                    continue
+                # Extract with a unique prefix to avoid collisions
+                safe_name = f"{uuid.uuid4().hex[:8]}-{Path(name).name}"
+                zf.extract(name, str(ASSETS_DIR))
+                extracted_path = ASSETS_DIR / name
+                if extracted_path.exists():
+                    # Rename to safe name
+                    new_path = ASSETS_DIR / safe_name
+                    extracted_path.rename(new_path)
+                    extracted.append({"original": name, "saved": safe_name, "url": f"/assets/{safe_name}"})
+    except zipfile.BadZipFile:
+        return jsonify({"error": "Invalid ZIP file"}), 400
+
+    host = request.host
+    forwarded = request.headers.get("X-Forwarded-Host", "")
+    if forwarded:
+        host = forwarded
+
+    return jsonify({
+        "extracted": len(extracted),
+        "files": extracted,
+        "base_url": f"https://{host}/assets/"
+    }), 201
+
 
 # ══════════════════════════════════════════════════════════════
 #  API — Health
@@ -876,6 +1064,7 @@ def save_project(project_id):
                 _ensure_form_attrs(components)
             pp = _page_path(project_id, page_id)
             pp.parent.mkdir(parents=True, exist_ok=True)
+            _backup_page(pp)
             pp.write_text(json.dumps(page_data, indent=2))
         meta["pages"] = list(data["pages_data"].keys())
     elif "components" in data or "styles" in data:
@@ -885,6 +1074,7 @@ def save_project(project_id):
             _ensure_form_attrs(components)
         pp = _page_path(project_id, page_id)
         pp.parent.mkdir(parents=True, exist_ok=True)
+        _backup_page(pp)
         pp.write_text(json.dumps({
             "components": data.get("components", ""),
             "styles": data.get("styles", ""),
@@ -1225,10 +1415,66 @@ Generate a single self-contained HTML section based on the user's request. If th
 
     try:
         if vision_url:
-            generated = _claude_generate(system_msg, [
-                {"type": "text", "text": prompt},
+            # TWO-STAGE APPROACH: extract spec first, then build exact HTML
+            # This prevents the garbage single-pass output
+
+            # Stage 1: Extract rigid layout spec from the image
+            vision_prompt = """You are a forensic UI analyst. Look at this design image and describe the EXACT pixel-level layout as a rigid specification. Be precise about every color, font size, spacing, and text.
+
+Output ONLY this JSON structure — no markdown, no explanations, no backticks:
+{
+  "layout": {"columns": 1|2, "text_side": "left|right|center", "image_side": "left|right|none", "vertical_center": true|false, "gap": "Xpx", "padding": "Xpx Xpx"},
+  "bg": {"color": "#hex", "has_image": true|false, "image_position": "right|left|full"},
+  "elements": [
+    {"type": "badge|headline|subtitle|text|button|input|pricing|card|image", "content": "exact text", "color": "#hex", "bg_color": "#hex", "font_size": "Xpx", "font_weight": "bold|normal", "text_transform": "uppercase|lowercase|none", "padding": "Xpx Xpx", "margin": "Xpx Xpx", "border_radius": "Xpx", "width": "Xpx or auto", "height": "Xpx or auto", "position": "left|center|right"}
+  ]
+}
+
+CRITICAL RULES:
+- Every color must be an exact #hex value from the image
+- Every text string must be EXACTLY what's in the image — copy verbatim
+- Every font size must be a specific pixel value
+- Do NOT describe what you see — output ONLY the JSON
+- If there's a background image, note its position (right/left/full)
+- If text has strikethrough prices, mark them with "strikethrough": true"""
+
+            spec_json = _claude_generate(vision_prompt, [
+                {"type": "text", "text": "Extract exact layout spec from this design image."},
                 {"type": "image", "source": {"type": "url", "url": vision_url}}
-            ])
+            ], max_tokens=2000)
+
+            # Parse the JSON spec
+            if spec_json.startswith("```"):
+                spec_json = spec_json.split("\n", 1)[1].rsplit("```", 1)[0]
+            spec = json.loads(spec_json)
+
+            # Stage 2: Build exact HTML from the spec
+            build_prompt = f"""You are a pixel-perfect web developer. Copy this EXACT layout specification into a single HTML section. Do NOT improvise, do NOT redesign, do NOT add anything not in the spec.
+
+## RIGID SPECIFICATION
+```json
+{json.dumps(spec, indent=2)}
+```
+
+## EXISTING THEME CSS (reference for available classes)
+```css
+{theme_css[:2000]}
+```
+
+## ABSOLUTE RULES
+1. EVERY color must be the EXACT hex from the spec — no substitutions
+2. EVERY font size, padding, gap must match the spec values exactly
+3. ALL text content must be EXACTLY the text strings from the spec — copy verbatim
+4. Layout structure (columns, positions) must match the spec exactly
+5. If spec has 2 columns: text on left, image/visual on right
+6. For buttons: use inline styles matching the spec colors. DO NOT use .btn-primary unless the spec colors match the theme's accent
+7. For the background image: use a CSS background-image with the right-side positioning if spec indicates
+8. Do NOT add placeholder text like "Left Column" or "Right Column" — those are guides for YOU, not output
+9. Use semantic HTML: <section>, <div>, <h1>, <h2>, <p>, <input>, <button>, <a>
+10. ALL styles must be INLINE (style="...") — no CSS classes except what's needed for layout
+11. Return ONLY the HTML. No markdown, no explanations, no backticks."""
+
+            generated = _claude_generate(build_prompt, "Build the section matching this exact spec.", max_tokens=4000)
         else:
             generated = _claude_generate(system_msg, prompt)
 
@@ -1241,7 +1487,7 @@ Generate a single self-contained HTML section based on the user's request. If th
                 lines = lines[:-1]
             generated = "\n".join(lines)
 
-        return jsonify({"html": generated, "model": "claude-sonnet-4"})
+        return jsonify({"html": generated, "model": "claude-sonnet-4", "spec": spec if vision_url else None})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1678,6 +1924,405 @@ If match_score >= 95, set discrepancies to empty array []."""
         "page_id": page_id,
         "best_score": best_score,
         "iterations": iterations_log
+    })
+
+# ══════════════════════════════════════════════════════════════
+#  AI — Pixel-Perfect Layout from Image + Assets
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/api/ai/pixel-perfect", methods=["POST"])
+def ai_pixel_perfect():
+    """
+    Convert a design mockup image + exported asset folder into pixel-perfect HTML.
+    Three-stage pipeline:
+    1. Run find_offsets.py to locate assets within the mockup
+    2. Generate pixel-perfect HTML using cqw-based responsive methodology
+    3. Closed-loop refinement: screenshot → compare → fix (up to 3 iterations)
+    
+    Body: {
+        "mockup_url": "https://.../mockup.png",
+        "prompt": "Build the hero section...",    // optional
+        "refine": true                            // optional — enable closed-loop
+    }
+    """
+    import subprocess, urllib.request, base64
+    
+    data = request.get_json() or {}
+    mockup_url = data.get("mockup_url", "")
+    prompt = data.get("prompt", "Build a pixel-perfect HTML section matching this mockup exactly.")
+    do_refine = data.get("refine", False)
+    uploaded_assets = data.get("assets", [])  # From frontend ZIP upload
+    
+    if not mockup_url:
+        return jsonify({"error": "mockup_url is required"}), 400
+    
+    # ── Step 0: Download mockup ──
+    mockup_filename = f"mockup-{uuid.uuid4().hex}.png"
+    mockup_path = str(ASSETS_DIR / mockup_filename)
+    try:
+        urllib.request.urlretrieve(mockup_url, mockup_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to download mockup: {e}"}), 400
+    
+    # Get mockup dimensions
+    from PIL import Image as PILImage
+    mockup_img = PILImage.open(mockup_path)
+    mockup_w, mockup_h = mockup_img.size
+    
+    # ── Step 1: Run offset finder ──
+    offsets_data = []
+    skill_dir = Path("/opt/data/skills/custom/converting-images-to-pixel-perfect-html")
+    finder_script = skill_dir / "scripts" / "find_offsets.py"
+    
+    if finder_script.exists():
+        try:
+            result = subprocess.run(
+                ["/opt/grapesjs-api/venv/bin/python3", str(finder_script),
+                 "--mockup", mockup_path, "--assets", str(ASSETS_DIR)],
+                capture_output=True, text=True, timeout=60
+            )
+            if result.returncode == 0:
+                # Parse output: "Match file.png: offset=(374, 77) | size=(433, 543) | SAD=12.45"
+                for line in result.stdout.strip().split("\n"):
+                    if line.startswith("Match "):
+                        parts = line.split("|")
+                        name_part = parts[0].replace("Match ", "").strip().rstrip(":")
+                        offset_str = parts[1].split("=")[1].strip() if len(parts) > 1 else "(0,0)"
+                        size_str = parts[2].split("=")[1].strip() if len(parts) > 2 else "(0,0)"
+                        # Parse (374, 77)
+                        import re as re_mod
+                        offset_match = re_mod.findall(r"[\d-]+", offset_str)
+                        size_match = re_mod.findall(r"\d+", size_str)
+                        offsets_data.append({
+                            "name": name_part,
+                            "x": int(offset_match[0]) if offset_match else 0,
+                            "y": int(offset_match[1]) if len(offset_match) > 1 else 0,
+                            "width": int(size_match[0]) if size_match else 0,
+                            "height": int(size_match[1]) if len(size_match) > 1 else 0
+                        })
+                if offsets_data:
+                    app.logger.info(f"Offset finder: found {len(offsets_data)} assets")
+        except Exception as e:
+            app.logger.warning(f"Offset finder failed: {e}")
+    
+    # Build asset information for the prompt
+    # Match uploaded assets with offset finder results to get URLs
+    asset_url_map = {}  # original_name → url
+    for a in uploaded_assets:
+        asset_url_map[a.get("original", "")] = a.get("url", "")
+        # Also map by saved filename for flexibility
+        saved = a.get("saved", "")
+        if saved:
+            asset_url_map[saved] = a.get("url", "")
+    
+    asset_info = ""
+    if offsets_data:
+        asset_list_lines = []
+        for a in offsets_data:
+            name = a['name']
+            # Find matching asset URL
+            asset_url = asset_url_map.get(name, "")
+            if not asset_url:
+                # Try fuzzy match
+                for orig, url in asset_url_map.items():
+                    if name in orig or orig in name:
+                        asset_url = url
+                        break
+            asset_list_lines.append(
+                f"  - {name}: position=({a['x']},{a['y']}), size={a['width']}x{a['height']}px, "
+                f"url={asset_url or 'NOT_FOUND'}"
+            )
+        asset_list = "\n".join(asset_list_lines)
+        asset_info = f"""
+## ASSET IMAGES (use these EXACT <img> tags)
+Mockup dimensions: {mockup_w}x{mockup_h}px
+
+Each asset below has its exact position AND its public URL. Use <img src="URL" style="position:absolute; top:Ypx; left:Xpx; width:Wpx; height:Hpx;"> for every asset:
+{asset_list}
+
+CRITICAL: Use the URL provided for each asset. Do NOT skip any asset — every asset must appear in the HTML."""
+    elif uploaded_assets:
+        asset_url_list = "\n".join(
+            f"  - {a.get('original', a.get('saved', 'unknown'))}: {a.get('url', '')}"
+            for a in uploaded_assets
+        )
+        asset_info = f"""
+## UPLOADED ASSETS (use these URLs in <img> tags)
+{asset_url_list}
+
+CRITICAL: Use these exact URLs for <img> tags. Position each asset by visually matching it to the mockup."""
+    
+    # ── Step 2: Generate pixel-perfect HTML ──
+    generation_prompt = f"""You are a pixel-perfect web developer specializing in design-to-code conversion. 
+Generate a SINGLE self-contained HTML section that reproduces this design mockup EXACTLY.
+
+## METHODOLOGY — PX-BASED ABSOLUTE POSITIONING (GrapesJS Compatible)
+
+### Why PX-Based (NOT cqw/container queries)
+This HTML will be inserted into GrapesJS — a visual page builder. Container queries and cqw units BREAK inside GrapesJS's nested iframe/component structure. Use plain px values instead — GrapesJS preserves them exactly.
+
+### Wrapper
+Wrap everything in a <section> with:
+- `position: relative; width: {mockup_w}px; height: {mockup_h}px; max-width: 100%; overflow: hidden;`
+- Background color extracted from the mockup
+- This wrapper establishes the coordinate system for all absolute children
+
+### Positioning ALL Elements
+1. EVERY element inside the wrapper gets `position: absolute;` with EXACT px values:
+   - `top: Xpx; left: Xpx; width: Xpx; height: Xpx;`
+2. Font sizes in px: `font-size: Xpx;`
+3. All margins/padding in px
+4. Use the offset data above for asset images
+5. EVERY element gets inline styles — NO CSS classes for positioning
+
+### Mobile Responsive (media query)
+```css
+@media (max-width: 767px) {{
+  section {{ width: 100% !important; height: auto !important; }}
+  section * {{ position: relative !important; top: auto !important; left: auto !important; width: 100% !important; height: auto !important; max-width: 100% !important; }}
+}}
+```
+Wrap in a <style> block inside the section.
+
+### Asset Images
+For every asset listed above, use: `<img src="URL" style="position:absolute; top:Ypx; left:Xpx; width:Wpx; height:Hpx;">`
+Use the EXACT URLs provided — they are publicly accessible.
+
+### SVG Distress/Texture Filter
+If the mockup has grunge/stamped/weathered typography, include this SVG filter:
+```svg
+<svg style="position:absolute;width:0;height:0;">
+  <filter id="distress">
+    <feTurbulence type="fractalNoise" baseFrequency="0.04" numOctaves="4" result="noise"/>
+    <feDisplacementMap in="SourceGraphic" in2="noise" scale="3" xChannelSelector="R" yChannelSelector="G"/>
+    <feBlend mode="multiply" in2="SourceGraphic"/>
+  </filter>
+</svg>
+```
+Apply to text: `filter:url(#distress);`
+
+### Color Matching
+- Extract EXACT #hex colors from the mockup for every element
+- Use the mockup's exact background color for the wrapper
+- Match text colors precisely — do NOT substitute
+
+### Output Rules
+- Return ONLY the complete HTML — no markdown, no explanations, no backticks
+- One `<section>` containing everything (wrapper + all children)
+- Inline styles on every element for positioning
+- NO external CSS files, NO CSS classes for layout
+- ALL text must be semantically correct (h1, h2, p, span, button, input)
+- If the mockup has a CTA button, use a real `<button>` with the exact colors
+- Include a <style> block inside the section for media queries and font-face declarations
+
+{asset_info}"""
+    
+    try:
+        generated_html = _claude_generate(generation_prompt, [
+            {"type": "text", "text": prompt},
+            {"type": "image", "source": {"type": "url", "url": mockup_url}}
+        ], max_tokens=8000)
+        
+        if generated_html.startswith("```"):
+            lines = generated_html.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            generated_html = "\n".join(lines)
+    except Exception as e:
+        return jsonify({"error": f"Generation failed: {e}"}), 500
+    
+    # ── Step 3: Closed-loop refinement (screenshot → compare → fix) ──
+    iterations = []
+    if do_refine:
+        for iteration in range(3):
+            try:
+                # Write HTML to temp file and serve it
+                temp_name = f"refine-{uuid.uuid4().hex}.html"
+                temp_path = ASSETS_DIR / temp_name
+                temp_path.write_text(f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>body{{margin:0;padding:0;background:#111;display:flex;justify-content:center;align-items:center;min-height:100vh;}}</style>
+</head><body>{generated_html}</body></html>""")
+                
+                host = request.host
+                forwarded = request.headers.get("X-Forwarded-Host", "")
+                if forwarded:
+                    host = forwarded
+                temp_url = f"https://{host}/assets/{temp_name}"
+                
+                # Screenshot the rendered output
+                rendered_b64 = _take_screenshot_b64(temp_url)
+                
+                # Clean up
+                temp_path.unlink(missing_ok=True)
+                
+                # Compare with mockup
+                compare_prompt = f"""Compare the rendered output (IMAGE 1) with the original mockup (IMAGE 2).
+Identify SPECIFIC differences in:
+- Element positioning (offsets, alignment)
+- Sizes (widths, heights, font sizes)
+- Colors (exact hex mismatches)
+- Missing or extra elements
+- Spacing issues
+
+Output a JSON diff object with actionable fixes:
+{{"score": 0-100, "differences": ["specific fix 1", "specific fix 2", ...], "critical_fixes": ["must-fix 1", ...]}}
+
+If score >= 90, add "PASS": true to the JSON."""
+                
+                diff_json = _claude_generate(compare_prompt, [
+                    {"type": "text", "text": "Compare these two images and find differences."},
+                    {"type": "image", "source": {"type": "url", "url": f"data:image/png;base64,{rendered_b64.split(',')[1] if ',' in rendered_b64 else rendered_b64}"}},
+                    {"type": "image", "source": {"type": "url", "url": mockup_url}}
+                ], max_tokens=1000)
+                
+                # Parse the diff
+                if diff_json.startswith("```"):
+                    diff_json = diff_json.split("\n", 1)[1].rsplit("```", 1)[0]
+                import re as re_mod
+                diff_json = re_mod.sub(r'^[^{]*', '', diff_json)
+                diff = json.loads(diff_json)
+                
+                score = diff.get("score", 0)
+                iterations.append({"iteration": iteration + 1, "score": score, "differences": diff.get("differences", [])})
+                
+                if score >= 90 or diff.get("PASS"):
+                    break
+                
+                # Fix the differences
+                fixes = "\n".join(f"- {d}" for d in diff.get("critical_fixes", diff.get("differences", [])))
+                fix_prompt = f"""The rendered output has these differences from the mockup (score: {score}/100):
+{fixes}
+
+Rewrite the HTML to fix ALL of these issues. Keep everything that was already correct.
+Return ONLY the complete fixed HTML. No markdown, no explanations."""
+                
+                fixed_html = _claude_generate(fix_prompt, [
+                    {"type": "text", "text": "Fix these layout differences to match the mockup exactly."},
+                    {"type": "image", "source": {"type": "url", "url": mockup_url}}
+                ], max_tokens=8000)
+                
+                if fixed_html.startswith("```"):
+                    lines = fixed_html.split("\n")
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    fixed_html = "\n".join(lines)
+                
+                generated_html = fixed_html
+                
+            except Exception as e:
+                app.logger.warning(f"Refine iteration {iteration+1} failed: {e}")
+                iterations.append({"iteration": iteration + 1, "error": str(e)})
+                break
+    
+    return jsonify({
+        "html": generated_html,
+        "mockup": {"url": mockup_url, "width": mockup_w, "height": mockup_h},
+        "offsets": offsets_data,
+        "refinement": iterations,
+        "mockup_path": f"/assets/{mockup_filename}"
+    })
+
+@app.route("/api/ai/pixel-perfect/refine", methods=["POST"])
+def ai_pixel_perfect_refine():
+    """
+    Closed-loop refinement: take existing HTML, screenshot it, compare with mockup,
+    and iterate until score >= 90 or 3 iterations used.
+    
+    Body: {
+        "html": "<section>...</section>",
+        "mockup_url": "https://.../mockup.png"
+    }
+    """
+    import subprocess, urllib.request, base64
+    
+    data = request.get_json() or {}
+    html = data.get("html", "")
+    mockup_url = data.get("mockup_url", "")
+    
+    if not html or not mockup_url:
+        return jsonify({"error": "html and mockup_url are required"}), 400
+    
+    iterations = []
+    current_html = html
+    
+    for i in range(3):
+        try:
+            # Write HTML to temp file
+            temp_name = f"refine-{uuid.uuid4().hex}.html"
+            temp_path = ASSETS_DIR / temp_name
+            temp_path.write_text(f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>body{{margin:0;padding:0;background:#111;display:flex;justify-content:center;align-items:center;min-height:100vh;}}</style>
+</head><body>{current_html}</body></html>""")
+            
+            host = request.host
+            forwarded = request.headers.get("X-Forwarded-Host", "")
+            if forwarded:
+                host = forwarded
+            temp_url = f"https://{host}/assets/{temp_name}"
+            
+            # Screenshot
+            rendered_b64 = _take_screenshot_b64(temp_url)
+            temp_path.unlink(missing_ok=True)
+            
+            # Compare
+            compare_prompt = """Compare the rendered output (IMAGE 1) with the original mockup (IMAGE 2).
+Identify SPECIFIC differences in positioning, sizes, colors, missing elements, and spacing.
+Output a JSON diff: {"score": 0-100, "differences": ["fix 1", "fix 2"], "critical_fixes": ["must-fix"]}
+If score >= 90, add "PASS": true."""
+            
+            diff_json = _claude_generate(compare_prompt, [
+                {"type": "text", "text": "Compare these two images and find differences."},
+                {"type": "image", "source": {"type": "url", "url": f"data:image/png;base64,{rendered_b64.split(',')[1] if ',' in rendered_b64 else rendered_b64}"}},
+                {"type": "image", "source": {"type": "url", "url": mockup_url}}
+            ], max_tokens=1000)
+            
+            if diff_json.startswith("```"):
+                diff_json = diff_json.split("\n", 1)[1].rsplit("```", 1)[0]
+            import re as re_mod
+            diff_json = re_mod.sub(r'^[^{]*', '', diff_json)
+            diff = json.loads(diff_json)
+            
+            score = diff.get("score", 0)
+            iterations.append({"iteration": i + 1, "score": score, "differences": diff.get("differences", [])})
+            
+            if score >= 90 or diff.get("PASS"):
+                break
+            
+            # Fix
+            fixes = "\n".join(f"- {d}" for d in diff.get("critical_fixes", diff.get("differences", [])))
+            fix_prompt = f"""Fix these differences from the mockup (score: {score}/100):
+{fixes}
+
+Rewrite the HTML to fix ALL issues. Return ONLY the complete fixed HTML. No markdown."""
+            
+            fixed_html = _claude_generate(fix_prompt, [
+                {"type": "text", "text": "Fix these layout differences to match the mockup exactly."},
+                {"type": "image", "source": {"type": "url", "url": mockup_url}}
+            ], max_tokens=8000)
+            
+            if fixed_html.startswith("```"):
+                lines = fixed_html.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                fixed_html = "\n".join(lines)
+            
+            current_html = fixed_html
+            
+        except Exception as e:
+            app.logger.warning(f"Refine iteration {i+1} failed: {e}")
+            iterations.append({"iteration": i + 1, "error": str(e)})
+            break
+    
+    return jsonify({
+        "html": current_html,
+        "refinement": iterations,
+        "final_score": iterations[-1].get("score", 0) if iterations else 0
     })
 
 # ══════════════════════════════════════════════════════════════
